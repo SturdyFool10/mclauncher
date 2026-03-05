@@ -1,3 +1,4 @@
+use config::{Config, ConfigFormat, LoadConfigResult, create_default_config, load_config};
 use eframe::{self, egui};
 use egui::CentralPanel;
 use fontloader::{FontCatalog, FontSpec, Slant, Stretch, Weight};
@@ -6,10 +7,17 @@ fn topbar_buttons() -> Vec<&'static str> {
     vec!["File", "Edit", "View", "Help"]
 }
 
-struct VertexApp {}
+struct VertexApp {
+    font_catalog: FontCatalog,
+    config: Config,
+    show_config_format_modal: bool,
+    selected_config_format: ConfigFormat,
+    default_config_format: ConfigFormat,
+    config_creation_error: Option<String>,
+}
 
 impl VertexApp {
-    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, config_state: LoadConfigResult) -> Self {
         let mut cat = FontCatalog::new();
         cat.load_system();
 
@@ -28,23 +36,115 @@ impl VertexApp {
         } else {
             eprintln!("Maple Mono NF Regular not found; using egui default fonts.");
         }
-        Self {}
+
+        let (config, show_config_format_modal, selected_config_format, default_config_format) =
+            match config_state {
+                LoadConfigResult::Loaded(config) => {
+                    (config, false, ConfigFormat::Json, ConfigFormat::Json)
+                }
+                LoadConfigResult::Missing { default_format } => {
+                    (Config::default(), true, default_format, default_format)
+                }
+            };
+
+        Self {
+            font_catalog: cat,
+            config,
+            show_config_format_modal,
+            selected_config_format,
+            default_config_format,
+            config_creation_error: None,
+        }
+    }
+
+    fn create_config_with_choice(&mut self, choice: ConfigFormat) {
+        match create_default_config(choice) {
+            Ok(config) => {
+                self.config = config;
+                self.show_config_format_modal = false;
+                self.config_creation_error = None;
+            }
+            Err(err) => {
+                self.config_creation_error = Some(format!("Failed to create config: {err}"));
+            }
+        }
+    }
+
+    fn render_config_format_modal(&mut self, ctx: &egui::Context) {
+        egui::Window::new("Select config format")
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .collapsible(false)
+            .resizable(false)
+            .movable(false)
+            .show(ctx, |ui| {
+                ui.set_min_width(360.0);
+                ui.heading("Config format");
+                ui.add_space(8.0);
+
+                ui.radio_value(
+                    &mut self.selected_config_format,
+                    ConfigFormat::Toml,
+                    ConfigFormat::Toml.label(),
+                );
+                ui.radio_value(
+                    &mut self.selected_config_format,
+                    ConfigFormat::Json,
+                    ConfigFormat::Json.label(),
+                );
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(8.0);
+                ui.label("Choose a format to create your initial launcher config.");
+
+                if let Some(err) = &self.config_creation_error {
+                    ui.add_space(6.0);
+                    ui.colored_label(egui::Color32::from_rgb(220, 80, 80), err);
+                }
+
+                ui.add_space(12.0);
+                let mut create_clicked = false;
+                let mut cancel_clicked = false;
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    create_clicked = ui
+                        .add_sized([120.0, 28.0], egui::Button::new("Create config"))
+                        .clicked();
+                    cancel_clicked = ui
+                        .add_sized([90.0, 28.0], egui::Button::new("Cancel"))
+                        .clicked();
+                });
+
+                if cancel_clicked {
+                    self.create_config_with_choice(self.default_config_format);
+                } else if create_clicked {
+                    self.create_config_with_choice(self.selected_config_format);
+                }
+            });
     }
 }
 
 impl eframe::App for VertexApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let modal_open = self.show_config_format_modal;
+
         CentralPanel::default().show(ctx, |ui| {
-            ui.horizontal_top(|ui| {
-                for button in topbar_buttons() {
-                    let val = ui.button(button);
-                    if val.clicked() {
-                        println!("button {} clicked", button)
+            ui.add_enabled_ui(!modal_open, |ui| {
+                ui.horizontal_top(|ui| {
+                    for button in topbar_buttons() {
+                        let val = ui.button(button);
+                        if val.clicked() {
+                            println!("button {} clicked", button)
+                        }
                     }
-                }
+                });
+                ui.label("Hello Vertex Launcher");
             });
-            ui.label("Hello Vertex Launcher")
         });
+
+        if modal_open {
+            self.render_config_format_modal(ctx);
+        }
     }
 }
 
@@ -60,7 +160,7 @@ fn main() -> eframe::Result<()> {
         renderer: eframe::Renderer::Wgpu,
         hardware_acceleration: eframe::HardwareAcceleration::Required,
         vsync: false,
-        multisampling: 1,
+        multisampling: 4,
         depth_buffer: 0,
         stencil_buffer: 0,
         dithering: false,
@@ -90,9 +190,10 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
+    let config_state = load_config();
     eframe::run_native(
         "Vertex Launcher",
         options,
-        Box::new(|cc| Ok(Box::new(VertexApp::new(cc)))),
+        Box::new(|cc| Ok(Box::new(VertexApp::new(cc, config_state)))),
     )
 }
