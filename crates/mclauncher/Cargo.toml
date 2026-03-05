@@ -8,3 +8,4 @@ eframe.workspace = true
 egui.workspace = true
 serde.workspace = true
 wgpu.workspace = true
+fontloader.workspace = true

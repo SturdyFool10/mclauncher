@@ -1,17 +1,50 @@
 use eframe::{self, egui};
 use egui::CentralPanel;
+use fontloader::{FontCatalog, FontSpec, Slant, Stretch, Weight};
+
+fn topbar_buttons() -> Vec<&'static str> {
+    vec!["File", "Edit", "View", "Help"]
+}
 
 struct VertexApp {}
 
 impl VertexApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        let mut cat = FontCatalog::new();
+        cat.load_system();
+
+        let spec = FontSpec::new(&["Maple Mono NF"])
+            .weight(Weight::REGULAR)
+            .slant(Slant::Upright)
+            .stretch(Stretch::Normal);
+
+        if let Ok((bytes, _face_index)) = cat.query_bytes(&spec) {
+            fontloader::egui_integration::install_font_as_primary(
+                &cc.egui_ctx,
+                "maple_mono_nf_regular",
+                bytes,
+                18.0,
+            );
+        } else {
+            eprintln!("Maple Mono NF Regular not found; using egui default fonts.");
+        }
         Self {}
     }
 }
 
 impl eframe::App for VertexApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        CentralPanel::default().show(ctx, |ui| ui.label("Hello Vertex Launcher"));
+        CentralPanel::default().show(ctx, |ui| {
+            ui.horizontal_top(|ui| {
+                for button in topbar_buttons() {
+                    let val = ui.button(button);
+                    if val.clicked() {
+                        println!("button {} clicked", button)
+                    }
+                }
+            });
+            ui.label("Hello Vertex Launcher")
+        });
     }
 }
 
