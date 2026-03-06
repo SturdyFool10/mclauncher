@@ -12,6 +12,7 @@ wgpu.workspace = true
 fontloader.workspace = true
 config.workspace = true
 textui.workspace = true
+auth.workspace = true
 raw-window-handle = "0.6.2"
 toml.workspace = true
 

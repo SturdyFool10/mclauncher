@@ -1,8 +1,11 @@
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
 use egui::{
-    self, Align, Context, CursorIcon, Layout, ResizeDirection, Sense, TopBottomPanel,
+    self, Align, Button, Context, CursorIcon, Layout, ResizeDirection, Sense, TopBottomPanel,
     ViewportCommand,
 };
-use textui::{LabelOptions, TextUi};
+use textui::{ButtonOptions, LabelOptions, TextUi};
 
 use crate::{assets, screens::AppScreen, ui::components::icon_button};
 
@@ -11,9 +14,36 @@ const CONTROL_SLOT_WIDTH: f32 = 20.0;
 const CONTROL_ICON_MAX_WIDTH: f32 = 20.0;
 const CONTROL_GAP: f32 = 7.0;
 const CONTROL_GROUP_PADDING: f32 = 12.0;
+const PROFILE_BUTTON_VERTICAL_PADDING: f32 = 5.0;
+const PROFILE_TO_CONTROLS_GAP: f32 = 8.0;
+const PROFILE_POPUP_MIN_WIDTH: f32 = 310.0;
 const RESIZE_GRAB_THICKNESS: f32 = 6.0;
 
-pub fn render(ctx: &Context, active_screen: AppScreen, text_ui: &mut TextUi) {
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TopBarOutput {
+    pub start_sign_in: bool,
+    pub sign_out: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ProfileUiModel<'a> {
+    pub display_name: Option<&'a str>,
+    pub avatar_png: Option<&'a [u8]>,
+    pub sign_in_in_progress: bool,
+    pub status_message: Option<&'a str>,
+    pub device_user_code: Option<&'a str>,
+    pub verification_uri: Option<&'a str>,
+    pub verification_uri_complete: Option<&'a str>,
+}
+
+pub fn render(
+    ctx: &Context,
+    active_screen: AppScreen,
+    text_ui: &mut TextUi,
+    profile_ui: ProfileUiModel<'_>,
+) -> TopBarOutput {
+    let mut output = TopBarOutput::default();
+
     TopBottomPanel::top("window_top_bar")
         .exact_height(TOP_BAR_HEIGHT)
         .resizable(false)
@@ -30,9 +60,13 @@ pub fn render(ctx: &Context, active_screen: AppScreen, text_ui: &mut TextUi) {
         .show(ctx, |ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             let full_rect = ui.max_rect();
-            let controls_width =
+            let profile_button_size =
+                (TOP_BAR_HEIGHT - (PROFILE_BUTTON_VERTICAL_PADDING * 2.0)).max(1.0);
+            let control_group_width =
                 (CONTROL_SLOT_WIDTH * 3.0) + (CONTROL_GAP * 2.0) + (CONTROL_GROUP_PADDING * 2.0);
-            let controls_min_x = (full_rect.max.x - controls_width).max(full_rect.min.x);
+            let right_side_width =
+                control_group_width + PROFILE_TO_CONTROLS_GAP + profile_button_size;
+            let controls_min_x = (full_rect.max.x - right_side_width).max(full_rect.min.x);
             let drag_rect = egui::Rect::from_min_max(
                 full_rect.min,
                 egui::pos2(controls_min_x, full_rect.max.y),
@@ -85,10 +119,30 @@ pub fn render(ctx: &Context, active_screen: AppScreen, text_ui: &mut TextUi) {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.add_space(CONTROL_GROUP_PADDING);
                     render_controls(ui, ctx);
+                    ui.add_space(PROFILE_TO_CONTROLS_GAP);
+
+                    let profile_response =
+                        render_profile_button(ui, profile_ui, profile_button_size);
+                    let profile_popup_id = ui.id().with("profile_selector_popup");
+                    let _ = egui::Popup::menu(&profile_response)
+                        .id(profile_popup_id)
+                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                        .show(|ui| {
+                            render_profile_popup(
+                                ui,
+                                text_ui,
+                                profile_ui,
+                                &mut output,
+                                profile_popup_id,
+                            );
+                        });
+
                     ui.add_space(CONTROL_GROUP_PADDING);
                 });
             });
         });
+
+    output
 }
 
 pub fn handle_window_resize(ctx: &Context) {
@@ -199,4 +253,203 @@ fn render_control_button(
         },
     )
     .inner
+}
+
+fn render_profile_button(
+    ui: &mut egui::Ui,
+    profile_ui: ProfileUiModel<'_>,
+    button_size: f32,
+) -> egui::Response {
+    if let Some(avatar_png) = profile_ui.avatar_png {
+        let mut hasher = DefaultHasher::new();
+        avatar_png.hash(&mut hasher);
+        let uri = format!("bytes://vertex-profile/avatar-{:016x}.png", hasher.finish());
+        let icon_size = (button_size - 8.0).clamp(10.0, button_size);
+        let icon = egui::Image::from_bytes(uri, avatar_png.to_vec())
+            .fit_to_exact_size(egui::vec2(icon_size, icon_size));
+
+        let button = Button::image(icon)
+            .frame(true)
+            .stroke(egui::Stroke::new(
+                1.0,
+                ui.visuals().widgets.inactive.bg_stroke.color,
+            ))
+            .fill(if profile_ui.sign_in_in_progress {
+                ui.visuals().widgets.active.weak_bg_fill
+            } else {
+                ui.visuals().widgets.inactive.weak_bg_fill
+            });
+
+        ui.add_sized([button_size, button_size], button)
+    } else {
+        ui.allocate_ui_with_layout(
+            egui::vec2(button_size, button_size),
+            Layout::left_to_right(Align::Center),
+            |ui| {
+                icon_button::svg(
+                    ui,
+                    "profile_selector_default",
+                    assets::USER_SVG,
+                    "Profile selector",
+                    profile_ui.sign_in_in_progress,
+                    button_size,
+                )
+            },
+        )
+        .inner
+    }
+}
+
+fn render_profile_popup(
+    ui: &mut egui::Ui,
+    text_ui: &mut TextUi,
+    profile_ui: ProfileUiModel<'_>,
+    output: &mut TopBarOutput,
+    popup_id: egui::Id,
+) {
+    ui.set_min_width(PROFILE_POPUP_MIN_WIDTH);
+
+    let heading_style = LabelOptions {
+        font_size: 18.0,
+        line_height: 22.0,
+        weight: 700,
+        color: ui.visuals().text_color(),
+        wrap: false,
+        ..LabelOptions::default()
+    };
+    let body_style = LabelOptions {
+        color: ui.visuals().text_color(),
+        ..LabelOptions::default()
+    };
+    let mut code_style = body_style.clone();
+    code_style.monospace = true;
+    code_style.wrap = false;
+
+    let button_style = ButtonOptions {
+        min_size: egui::vec2(ui.available_width(), 30.0),
+        corner_radius: 6,
+        padding: egui::vec2(8.0, 4.0),
+        text_color: ui.visuals().text_color(),
+        fill: ui.visuals().widgets.inactive.bg_fill,
+        fill_hovered: ui.visuals().widgets.hovered.bg_fill,
+        fill_active: ui.visuals().widgets.active.bg_fill,
+        fill_selected: ui.visuals().selection.bg_fill,
+        stroke: ui.visuals().widgets.inactive.bg_stroke,
+        ..ButtonOptions::default()
+    };
+
+    if let Some(name) = profile_ui.display_name {
+        let _ = text_ui.label(
+            ui,
+            "profile_popup_signed_in",
+            &format!("Signed in as {name}"),
+            &heading_style,
+        );
+    } else {
+        let _ = text_ui.label(
+            ui,
+            "profile_popup_signed_out",
+            "No Microsoft account signed in",
+            &heading_style,
+        );
+    }
+
+    if let Some(message) = profile_ui.status_message {
+        ui.add_space(4.0);
+        let _ = text_ui.label(ui, "profile_popup_status", message, &body_style);
+    }
+
+    if let Some(user_code) = profile_ui.device_user_code {
+        ui.add_space(6.0);
+        let _ = text_ui.label(
+            ui,
+            "profile_popup_code_caption",
+            "Enter this code at Microsoft sign-in:",
+            &body_style,
+        );
+        let _ = text_ui.label(ui, "profile_popup_code", user_code, &code_style);
+
+        ui.horizontal(|ui| {
+            let mut compact_button_style = button_style.clone();
+            compact_button_style.min_size = egui::vec2(130.0, 28.0);
+
+            if text_ui
+                .button(
+                    ui,
+                    "profile_popup_copy_code",
+                    "Copy code",
+                    &compact_button_style,
+                )
+                .clicked()
+            {
+                ui.ctx().copy_text(user_code.to_owned());
+            }
+
+            if let Some(url) = profile_ui
+                .verification_uri_complete
+                .or(profile_ui.verification_uri)
+            {
+                if text_ui
+                    .button(
+                        ui,
+                        "profile_popup_copy_url",
+                        "Copy sign-in URL",
+                        &compact_button_style,
+                    )
+                    .clicked()
+                {
+                    ui.ctx().copy_text(url.to_owned());
+                }
+            }
+        });
+
+        if let Some(url) = profile_ui.verification_uri {
+            let _ = text_ui.label(
+                ui,
+                "profile_popup_signin_page",
+                &format!("Sign-in page: {url}"),
+                &body_style,
+            );
+        }
+    }
+
+    ui.add_space(6.0);
+    ui.separator();
+    ui.add_space(4.0);
+
+    if profile_ui.sign_in_in_progress {
+        ui.add_enabled_ui(false, |ui| {
+            let _ = text_ui.button(
+                ui,
+                "profile_popup_signing_in",
+                "Signing in with Microsoft...",
+                &button_style,
+            );
+        });
+    } else if text_ui
+        .button(
+            ui,
+            "profile_popup_signin_action",
+            "Sign in with Microsoft",
+            &button_style,
+        )
+        .clicked()
+    {
+        output.start_sign_in = true;
+        egui::Popup::close_id(ui.ctx(), popup_id);
+    }
+
+    if profile_ui.display_name.is_some()
+        && text_ui
+            .button(
+                ui,
+                "profile_popup_signout_action",
+                "Sign out",
+                &button_style,
+            )
+            .clicked()
+    {
+        output.sign_out = true;
+        egui::Popup::close_id(ui.ctx(), popup_id);
+    }
 }
