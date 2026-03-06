@@ -10,9 +10,9 @@ const DEFAULT_USER_AGENT: &str =
     "VertexLauncher/0.1 (+https://github.com/SturdyFool10/vertexlauncher)";
 const MOJANG_VERSION_MANIFEST_URL: &str =
     "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
-const FABRIC_VERSION_MATRIX_URL: &str = "https://meta.fabricmc.net/v2/versions";
+const FABRIC_VERSION_MATRIX_URL: &str = "https://meta.fabricmc.net/v2/versions/loader";
 const FABRIC_GAME_VERSIONS_URL: &str = "https://meta.fabricmc.net/v2/versions/game";
-const QUILT_VERSION_MATRIX_URL: &str = "https://meta.quiltmc.org/v3/versions";
+const QUILT_VERSION_MATRIX_URL: &str = "https://meta.quiltmc.org/v3/versions/loader";
 const QUILT_GAME_VERSIONS_URL: &str = "https://meta.quiltmc.org/v3/versions/game";
 const FORGE_MAVEN_METADATA_URL: &str =
     "https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml";
@@ -22,6 +22,7 @@ const NEOFORGE_LEGACY_FORGE_METADATA_URL: &str =
     "https://maven.neoforged.net/releases/net/neoforged/forge/maven-metadata.xml";
 const CACHE_VERSION_CATALOG_RELEASES_FILE: &str = "version_catalog_release_only.json";
 const CACHE_VERSION_CATALOG_ALL_FILE: &str = "version_catalog_with_snapshots.json";
+const CACHE_LOADER_VERSIONS_DIR_NAME: &str = "loader_versions";
 const CACHE_DIR_NAME: &str = "cache";
 const VERSION_CATALOG_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
@@ -151,12 +152,28 @@ struct CachedVersionCatalog {
     catalog: VersionCatalog,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct CachedLoaderVersions {
+    fetched_at_unix_secs: u64,
+    loader_label: String,
+    versions_by_game_version: BTreeMap<String, Vec<String>>,
+}
+
 pub fn fetch_version_catalog(
     include_snapshots_and_betas: bool,
 ) -> Result<VersionCatalog, InstallationError> {
+    fetch_version_catalog_with_refresh(include_snapshots_and_betas, false)
+}
+
+pub fn fetch_version_catalog_with_refresh(
+    include_snapshots_and_betas: bool,
+    force_refresh: bool,
+) -> Result<VersionCatalog, InstallationError> {
     let cached = read_cached_version_catalog(include_snapshots_and_betas).ok();
-    if let Some(cached) = cached.as_ref()
+    if !force_refresh
+        && let Some(cached) = cached.as_ref()
         && !is_cache_expired(cached.fetched_at_unix_secs)
+        && catalog_has_loader_version_data(&cached.catalog)
     {
         return Ok(cached.catalog.clone());
     }
@@ -182,6 +199,53 @@ pub fn purge_cache() -> Result<(), InstallationError> {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
         Err(err) => Err(InstallationError::Io(err)),
+    }
+}
+
+pub fn fetch_loader_versions_for_game(
+    loader_label: &str,
+    game_version: &str,
+    force_refresh: bool,
+) -> Result<Vec<String>, InstallationError> {
+    let game_version = game_version.trim();
+    if game_version.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let loader_kind = normalized_loader_label(loader_label);
+    if matches!(loader_kind, LoaderKind::Vanilla | LoaderKind::Custom) {
+        return Ok(Vec::new());
+    }
+
+    let cached = read_cached_loader_versions(loader_kind).ok();
+    if !force_refresh
+        && let Some(cached) = cached.as_ref()
+        && !is_cache_expired(cached.fetched_at_unix_secs)
+        && let Some(versions) = cached.versions_by_game_version.get(game_version)
+    {
+        return Ok(versions.clone());
+    }
+
+    match fetch_loader_versions_for_game_uncached(loader_kind, game_version) {
+        Ok(versions) => {
+            let mut updated_cache = cached.unwrap_or_default();
+            updated_cache.fetched_at_unix_secs = now_unix_secs();
+            updated_cache.loader_label = loader_label.to_owned();
+            updated_cache
+                .versions_by_game_version
+                .insert(game_version.to_owned(), versions.clone());
+            let _ = write_cached_loader_versions(loader_kind, &updated_cache);
+            Ok(versions)
+        }
+        Err(err) => {
+            if let Some(cached) = cached
+                && let Some(versions) = cached.versions_by_game_version.get(game_version)
+            {
+                Ok(versions.clone())
+            } else {
+                Err(err)
+            }
+        }
     }
 }
 
@@ -379,6 +443,22 @@ fn is_cache_expired(fetched_at_unix_secs: u64) -> bool {
     now.saturating_sub(fetched_at_unix_secs) > VERSION_CATALOG_CACHE_TTL.as_secs()
 }
 
+fn catalog_has_loader_version_data(catalog: &VersionCatalog) -> bool {
+    let loader_versions = &catalog.loader_versions;
+    [
+        &loader_versions.fabric,
+        &loader_versions.forge,
+        &loader_versions.neoforge,
+        &loader_versions.quilt,
+    ]
+    .into_iter()
+    .any(|versions_by_game_version| {
+        versions_by_game_version
+            .values()
+            .any(|versions| !versions.is_empty())
+    })
+}
+
 fn fetch_fabric_versions() -> Result<HashSet<String>, InstallationError> {
     let versions: Vec<FabricGameVersion> = get_json(FABRIC_GAME_VERSIONS_URL)?;
     Ok(versions
@@ -487,32 +567,248 @@ fn parse_minecraft_versions_from_maven_metadata(
 fn parse_loader_version_matrix(matrix: &serde_json::Value) -> LoaderVersionCatalog {
     let mut catalog = LoaderVersionCatalog::default();
 
-    let Some(entries) = matrix.as_array() else {
-        return catalog;
-    };
+    match matrix {
+        serde_json::Value::Array(entries) => {
+            collect_loader_versions_from_entries(entries, &mut catalog);
+        }
+        serde_json::Value::Object(object) => {
+            // Support alternate wrappers some APIs use.
+            for key in ["loader", "versions", "data"] {
+                if let Some(entries) = object.get(key).and_then(serde_json::Value::as_array) {
+                    collect_loader_versions_from_entries(entries, &mut catalog);
+                }
+            }
+        }
+        _ => {}
+    }
 
+    catalog.supported_game_versions = catalog.versions_by_game_version.keys().cloned().collect();
+    catalog
+}
+
+fn collect_loader_versions_from_entries(
+    entries: &[serde_json::Value],
+    catalog: &mut LoaderVersionCatalog,
+) {
     for entry in entries {
         let Some(entry) = entry.as_object() else {
             continue;
         };
-        let Some(game_version) = entry.get("game").and_then(extract_version_from_json_value) else {
+
+        let Some(game_version) = extract_game_version_from_loader_entry(entry) else {
             continue;
         };
-        let Some(loader_version) = entry
-            .get("loader")
-            .and_then(extract_version_from_json_value)
-        else {
+        let Some(loader_version) = extract_loader_version_from_loader_entry(entry) else {
             continue;
         };
+
         push_unique_loader_version(
             &mut catalog.versions_by_game_version,
             game_version.as_str(),
             loader_version,
         );
     }
+}
 
-    catalog.supported_game_versions = catalog.versions_by_game_version.keys().cloned().collect();
-    catalog
+fn parse_global_loader_versions(matrix: &serde_json::Value) -> Vec<String> {
+    let mut versions = Vec::new();
+    let mut push_unique = |candidate: String| {
+        if !versions.iter().any(|existing| existing == &candidate) {
+            versions.push(candidate);
+        }
+    };
+
+    match matrix {
+        serde_json::Value::Array(entries) => {
+            collect_global_loader_versions_from_entries(entries, &mut push_unique);
+        }
+        serde_json::Value::Object(object) => {
+            let mut found_wrapped_entries = false;
+            for key in ["loader", "versions", "data"] {
+                if let Some(entries) = object.get(key).and_then(serde_json::Value::as_array) {
+                    found_wrapped_entries = true;
+                    collect_global_loader_versions_from_entries(entries, &mut push_unique);
+                }
+            }
+            if !found_wrapped_entries {
+                if let Some(version) = extract_loader_version_from_loader_entry(object) {
+                    push_unique(version);
+                } else if let Some(version) = object
+                    .get("version")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+                {
+                    push_unique(version);
+                }
+            }
+        }
+        _ => {}
+    }
+
+    versions
+}
+
+fn collect_global_loader_versions_from_entries<F>(
+    entries: &[serde_json::Value],
+    push_unique: &mut F,
+) where
+    F: FnMut(String),
+{
+    for entry in entries {
+        let Some(object) = entry.as_object() else {
+            continue;
+        };
+        if let Some(version) = extract_loader_version_from_loader_entry(object) {
+            push_unique(version);
+            continue;
+        }
+        if let Some(version) = object
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+        {
+            push_unique(version);
+        }
+    }
+}
+
+fn url_encode_component(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for &byte in value.as_bytes() {
+        let is_unreserved =
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~');
+        if is_unreserved {
+            out.push(byte as char);
+        } else {
+            out.push('%');
+            out.push_str(&format!("{byte:02X}"));
+        }
+    }
+    out
+}
+
+fn fetch_loader_versions_for_game_uncached(
+    loader_kind: LoaderKind,
+    game_version: &str,
+) -> Result<Vec<String>, InstallationError> {
+    match loader_kind {
+        LoaderKind::Fabric => {
+            let url = format!(
+                "{}/{}",
+                FABRIC_VERSION_MATRIX_URL.trim_end_matches('/'),
+                url_encode_component(game_version)
+            );
+            let payload: serde_json::Value = get_json(&url)?;
+            Ok(parse_global_loader_versions(&payload))
+        }
+        LoaderKind::Quilt => {
+            let url = format!(
+                "{}/{}",
+                QUILT_VERSION_MATRIX_URL.trim_end_matches('/'),
+                url_encode_component(game_version)
+            );
+            let payload: serde_json::Value = get_json(&url)?;
+            Ok(parse_global_loader_versions(&payload))
+        }
+        LoaderKind::Forge => {
+            let metadata = get_text(FORGE_MAVEN_METADATA_URL)?;
+            let catalog = parse_forge_loader_catalog_from_metadata(&metadata);
+            Ok(catalog
+                .versions_by_game_version
+                .get(game_version)
+                .cloned()
+                .unwrap_or_default())
+        }
+        LoaderKind::NeoForge => {
+            let catalog = fetch_neoforge_loader_catalog()?;
+            Ok(catalog
+                .versions_by_game_version
+                .get(game_version)
+                .cloned()
+                .unwrap_or_default())
+        }
+        LoaderKind::Vanilla | LoaderKind::Custom => Ok(Vec::new()),
+    }
+}
+
+fn loader_versions_cache_file_path(loader_kind: LoaderKind) -> Option<PathBuf> {
+    let file_name = match loader_kind {
+        LoaderKind::Fabric => "fabric_loader_versions.json",
+        LoaderKind::Forge => "forge_loader_versions.json",
+        LoaderKind::NeoForge => "neoforge_loader_versions.json",
+        LoaderKind::Quilt => "quilt_loader_versions.json",
+        LoaderKind::Vanilla | LoaderKind::Custom => return None,
+    };
+    Some(
+        cache_root_dir()
+            .join(CACHE_LOADER_VERSIONS_DIR_NAME)
+            .join(file_name),
+    )
+}
+
+fn read_cached_loader_versions(
+    loader_kind: LoaderKind,
+) -> Result<CachedLoaderVersions, InstallationError> {
+    let Some(path) = loader_versions_cache_file_path(loader_kind) else {
+        return Ok(CachedLoaderVersions::default());
+    };
+    let raw = fs::read_to_string(path)?;
+    Ok(serde_json::from_str(&raw)?)
+}
+
+fn write_cached_loader_versions(
+    loader_kind: LoaderKind,
+    cached: &CachedLoaderVersions,
+) -> Result<(), InstallationError> {
+    let Some(path) = loader_versions_cache_file_path(loader_kind) else {
+        return Ok(());
+    };
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = fs::File::create(path)?;
+    serde_json::to_writer_pretty(file, cached)?;
+    Ok(())
+}
+
+fn extract_game_version_from_loader_entry(
+    entry: &serde_json::Map<String, serde_json::Value>,
+) -> Option<String> {
+    // Fabric/Quilt loader endpoints commonly encode Minecraft version in "intermediary.version".
+    for key in [
+        "game",
+        "minecraft",
+        "minecraft_version",
+        "mcversion",
+        "intermediary",
+    ] {
+        if let Some(version) = entry.get(key).and_then(extract_version_from_json_value)
+            && is_probable_minecraft_version(version.as_str())
+        {
+            return Some(version);
+        }
+    }
+
+    // Fallback: check all object fields for a probable MC version string.
+    entry
+        .values()
+        .find_map(extract_version_from_json_value)
+        .filter(|version| is_probable_minecraft_version(version.as_str()))
+}
+
+fn extract_loader_version_from_loader_entry(
+    entry: &serde_json::Map<String, serde_json::Value>,
+) -> Option<String> {
+    for key in ["loader", "loader_version", "version"] {
+        if let Some(version) = entry.get(key).and_then(extract_version_from_json_value) {
+            return Some(version);
+        }
+    }
+    None
 }
 
 fn parse_forge_loader_catalog_from_metadata(metadata_xml: &str) -> LoaderVersionCatalog {
@@ -760,6 +1056,77 @@ fn normalized_loader_label(loader_label: &str) -> LoaderKind {
         "neoforge" => LoaderKind::NeoForge,
         "quilt" => LoaderKind::Quilt,
         _ => LoaderKind::Custom,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_loader_matrix_entries_from_array() {
+        let payload = serde_json::json!([
+            {
+                "loader": { "version": "0.16.5" },
+                "intermediary": { "version": "1.21.1" }
+            },
+            {
+                "loader": { "version": "0.16.4" },
+                "intermediary": { "version": "1.21.1" }
+            }
+        ]);
+
+        let catalog = parse_loader_version_matrix(&payload);
+        let versions = catalog
+            .versions_by_game_version
+            .get("1.21.1")
+            .expect("expected versions for 1.21.1");
+        assert!(versions.iter().any(|entry| entry == "0.16.5"));
+        assert!(versions.iter().any(|entry| entry == "0.16.4"));
+    }
+
+    #[test]
+    fn parses_loader_matrix_entries_from_loader_wrapped_object() {
+        let payload = serde_json::json!({
+            "loader": [
+                {
+                    "loader": { "version": "0.1.2" },
+                    "intermediary": { "version": "1.20.6" }
+                }
+            ]
+        });
+
+        let catalog = parse_loader_version_matrix(&payload);
+        let versions = catalog
+            .versions_by_game_version
+            .get("1.20.6")
+            .expect("expected versions for 1.20.6");
+        assert_eq!(versions, &vec!["0.1.2".to_owned()]);
+    }
+
+    #[test]
+    fn parses_global_loader_versions_when_matrix_has_no_game_mapping() {
+        let payload = serde_json::json!([
+            {
+                "loader": { "version": "0.16.10" }
+            },
+            {
+                "loader": { "version": "0.16.9" }
+            }
+        ]);
+
+        let versions = parse_global_loader_versions(&payload);
+        assert!(versions.iter().any(|entry| entry == "0.16.10"));
+        assert!(versions.iter().any(|entry| entry == "0.16.9"));
+    }
+
+    #[test]
+    fn url_encoding_covers_spaces_and_symbols() {
+        assert_eq!(
+            url_encode_component("1.14 Pre-Release 5"),
+            "1.14%20Pre-Release%205"
+        );
+        assert_eq!(url_encode_component("a/b"), "a%2Fb");
     }
 }
 

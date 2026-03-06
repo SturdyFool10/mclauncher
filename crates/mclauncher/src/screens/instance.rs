@@ -1,14 +1,17 @@
 use config::{Config, INSTANCE_DEFAULT_MAX_MEMORY_MIB_MIN, INSTANCE_DEFAULT_MAX_MEMORY_MIB_STEP};
 use egui::Ui;
 use installation::{
-    LoaderSupportIndex, MinecraftVersionEntry, ensure_game_files, fetch_version_catalog,
+    GameSetupResult, LoaderSupportIndex, MinecraftVersionEntry, VersionCatalog, ensure_game_files,
+    fetch_version_catalog_with_refresh,
 };
 use instances::{InstanceStore, set_instance_settings, set_instance_versions};
-use modprovider::{UnifiedContentEntry, search_minecraft_content};
-use std::path::Path;
-use std::sync::OnceLock;
+use modprovider::{UnifiedContentEntry, UnifiedSearchResult, search_minecraft_content};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::time::Duration;
 use textui::{ButtonOptions, LabelOptions, TextUi, TooltipOptions};
 
+use crate::app::tokio_runtime;
 use crate::ui::components::settings_widgets;
 
 const RESERVED_SYSTEM_MEMORY_MIB: u128 = 4 * 1024;
@@ -35,11 +38,24 @@ struct InstanceScreenState {
     discover_types: Vec<String>,
     discover_warnings: Vec<String>,
     discover_status: Option<String>,
+    discover_in_flight: bool,
+    discover_results_tx: Option<mpsc::Sender<(String, Result<UnifiedSearchResult, String>)>>,
+    discover_results_rx:
+        Option<Arc<Mutex<mpsc::Receiver<(String, Result<UnifiedSearchResult, String>)>>>>,
     available_game_versions: Vec<MinecraftVersionEntry>,
     selected_game_version_index: usize,
     loader_support: LoaderSupportIndex,
     version_catalog_include_snapshots: Option<bool>,
     version_catalog_error: Option<String>,
+    version_catalog_in_flight: bool,
+    version_catalog_results_tx: Option<mpsc::Sender<(bool, Result<VersionCatalog, String>)>>,
+    version_catalog_results_rx:
+        Option<Arc<Mutex<mpsc::Receiver<(bool, Result<VersionCatalog, String>)>>>>,
+    runtime_prepare_in_flight: bool,
+    runtime_prepare_results_tx:
+        Option<mpsc::Sender<(String, String, Result<GameSetupResult, String>)>>,
+    runtime_prepare_results_rx:
+        Option<Arc<Mutex<mpsc::Receiver<(String, String, Result<GameSetupResult, String>)>>>>,
 }
 
 impl InstanceScreenState {
@@ -68,11 +84,20 @@ impl InstanceScreenState {
             discover_types: Vec::new(),
             discover_warnings: Vec::new(),
             discover_status: None,
+            discover_in_flight: false,
+            discover_results_tx: None,
+            discover_results_rx: None,
             available_game_versions: Vec::new(),
             selected_game_version_index: 0,
             loader_support: LoaderSupportIndex::default(),
             version_catalog_include_snapshots: None,
             version_catalog_error: None,
+            version_catalog_in_flight: false,
+            version_catalog_results_tx: None,
+            version_catalog_results_rx: None,
+            runtime_prepare_in_flight: false,
+            runtime_prepare_results_tx: None,
+            runtime_prepare_results_rx: None,
         }
     }
 }
@@ -142,7 +167,14 @@ pub fn render(
         .data_mut(|d| d.get_temp::<InstanceScreenState>(state_id))
         .unwrap_or_else(|| InstanceScreenState::from_instance(&instance_snapshot, config));
 
+    poll_background_tasks(&mut state);
     sync_version_catalog(&mut state, config.include_snapshots_and_betas(), false);
+    if state.version_catalog_in_flight
+        || state.discover_in_flight
+        || state.runtime_prepare_in_flight
+    {
+        ui.ctx().request_repaint_after(Duration::from_millis(100));
+    }
     let selected_game_version_for_loader = selected_game_version(&state).to_owned();
     ensure_selected_modloader_is_supported(&mut state, selected_game_version_for_loader.as_str());
 
@@ -233,6 +265,17 @@ pub fn render(
         .clicked()
     {
         sync_version_catalog(&mut state, config.include_snapshots_and_betas(), true);
+    }
+    if state.version_catalog_in_flight {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            let _ = text_ui.label(
+                ui,
+                ("instance_versions_loading", instance_id),
+                "Fetching version catalog...",
+                &muted_style,
+            );
+        });
     }
 
     if let Some(catalog_error) = state.version_catalog_error.as_deref() {
@@ -538,30 +581,31 @@ pub fn render(
     );
     ui.add_space(8.0);
 
-    if text_ui
-        .button(
-            ui,
-            ("instance_discover_run", instance_id),
-            "Search both platforms",
-            &action_button_style,
-        )
-        .clicked()
-    {
-        match search_minecraft_content(&state.discover_query, 25) {
-            Ok(search) => {
-                state.discover_results = search.entries;
-                state.discover_types = search.discovered_types;
-                state.discover_warnings = search.warnings;
-                state.discover_status =
-                    Some(format!("Loaded {} entries.", state.discover_results.len()));
-            }
-            Err(err) => {
-                state.discover_status = Some(err.to_string());
-                state.discover_results.clear();
-                state.discover_types.clear();
-                state.discover_warnings.clear();
-            }
-        }
+    let mut discover_clicked = false;
+    ui.add_enabled_ui(!state.discover_in_flight, |ui| {
+        discover_clicked = text_ui
+            .button(
+                ui,
+                ("instance_discover_run", instance_id),
+                "Search both platforms",
+                &action_button_style,
+            )
+            .clicked();
+    });
+    if discover_clicked {
+        let query = state.discover_query.clone();
+        request_discovery_search(&mut state, query);
+    }
+    if state.discover_in_flight {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            let _ = text_ui.label(
+                ui,
+                ("instance_discover_loading", instance_id),
+                "Searching Modrinth and CurseForge...",
+                &muted_style,
+            );
+        });
     }
 
     if let Some(status) = state.discover_status.as_deref() {
@@ -678,22 +722,14 @@ fn render_runtime_row(
             } else if game_version.trim().is_empty() {
                 state.status_message =
                     Some("Cannot launch: choose a Minecraft game version first.".to_owned());
+            } else if state.runtime_prepare_in_flight {
+                state.status_message = Some("Already preparing game files...".to_owned());
             } else {
-                match ensure_game_files(instance_root, game_version) {
-                    Ok(setup) => {
-                        state.running = true;
-                        state.status_message = Some(format!(
-                            "Prepared Minecraft {} in {} ({} file(s) downloaded).",
-                            game_version,
-                            instance_root.display(),
-                            setup.downloaded_files
-                        ));
-                    }
-                    Err(err) => {
-                        state.running = false;
-                        state.status_message = Some(format!("Failed to prepare game files: {err}"));
-                    }
-                }
+                request_runtime_prepare(
+                    state,
+                    instance_root.to_path_buf(),
+                    game_version.trim().to_owned(),
+                );
             }
         }
         ui.add_space(10.0);
@@ -707,6 +743,10 @@ fn render_runtime_row(
             },
             &muted_style,
         );
+        if state.runtime_prepare_in_flight {
+            ui.add_space(8.0);
+            ui.spinner();
+        }
     });
 }
 
@@ -804,6 +844,12 @@ fn normalize_optional(value: &str) -> Option<String> {
     }
 }
 
+fn poll_background_tasks(state: &mut InstanceScreenState) {
+    poll_version_catalog(state);
+    poll_discovery_search(state);
+    poll_runtime_prepare(state);
+}
+
 fn sync_version_catalog(
     state: &mut InstanceScreenState,
     include_snapshots_and_betas: bool,
@@ -811,45 +857,288 @@ fn sync_version_catalog(
 ) {
     let should_refresh = force_refresh
         || state.version_catalog_include_snapshots != Some(include_snapshots_and_betas)
-        || state.available_game_versions.is_empty();
-    if !should_refresh {
+        || (state.available_game_versions.is_empty() && state.version_catalog_error.is_none());
+    if !should_refresh || state.version_catalog_in_flight {
         return;
     }
 
-    match fetch_version_catalog(include_snapshots_and_betas) {
-        Ok(catalog) => {
-            state.available_game_versions = catalog.game_versions;
-            state.loader_support = catalog.loader_support;
-            state.version_catalog_error = None;
-            state.version_catalog_include_snapshots = Some(include_snapshots_and_betas);
+    ensure_version_catalog_channel(state);
+    let Some(tx) = state.version_catalog_results_tx.as_ref().cloned() else {
+        return;
+    };
 
-            if state.available_game_versions.is_empty() {
-                state.selected_game_version_index = 0;
-                state.game_version_input.clear();
-                return;
+    state.version_catalog_in_flight = true;
+    state.version_catalog_error = None;
+    state.version_catalog_include_snapshots = Some(include_snapshots_and_betas);
+
+    let _ = tokio_runtime::spawn(async move {
+        let result = tokio_runtime::spawn_blocking(move || {
+            fetch_version_catalog_with_refresh(include_snapshots_and_betas, force_refresh)
+                .map_err(|err| err.to_string())
+        })
+        .await
+        .map_err(|err| format!("version catalog task join error: {err}"))
+        .and_then(|inner| inner);
+        let _ = tx.send((include_snapshots_and_betas, result));
+    });
+}
+
+fn ensure_version_catalog_channel(state: &mut InstanceScreenState) {
+    if state.version_catalog_results_tx.is_some() && state.version_catalog_results_rx.is_some() {
+        return;
+    }
+    let (tx, rx) = mpsc::channel::<(bool, Result<VersionCatalog, String>)>();
+    state.version_catalog_results_tx = Some(tx);
+    state.version_catalog_results_rx = Some(Arc::new(Mutex::new(rx)));
+}
+
+fn apply_version_catalog(
+    state: &mut InstanceScreenState,
+    include_snapshots_and_betas: bool,
+    catalog: VersionCatalog,
+) {
+    state.available_game_versions = catalog.game_versions;
+    state.loader_support = catalog.loader_support;
+    state.version_catalog_error = None;
+    state.version_catalog_include_snapshots = Some(include_snapshots_and_betas);
+
+    if state.available_game_versions.is_empty() {
+        state.selected_game_version_index = 0;
+        state.game_version_input.clear();
+        return;
+    }
+
+    let preferred_index = if state.game_version_input.trim().is_empty() {
+        0
+    } else {
+        state
+            .available_game_versions
+            .iter()
+            .position(|entry| entry.id == state.game_version_input)
+            .unwrap_or(0)
+    };
+    state.selected_game_version_index = preferred_index;
+    if let Some(selected) = state.available_game_versions.get(preferred_index) {
+        state.game_version_input = selected.id.clone();
+    }
+}
+
+fn apply_version_catalog_error(
+    state: &mut InstanceScreenState,
+    include_snapshots_and_betas: bool,
+    error: &str,
+) {
+    state.version_catalog_error = Some(format!("Failed to fetch version catalog: {error}"));
+    state.available_game_versions.clear();
+    state.loader_support = LoaderSupportIndex::default();
+    state.version_catalog_include_snapshots = Some(include_snapshots_and_betas);
+    state.selected_game_version_index = 0;
+    state.game_version_input.clear();
+}
+
+fn poll_version_catalog(state: &mut InstanceScreenState) {
+    let mut updates = Vec::new();
+    let mut should_reset_channel = false;
+    if let Some(rx) = state.version_catalog_results_rx.as_ref() {
+        match rx.lock() {
+            Ok(receiver) => loop {
+                match receiver.try_recv() {
+                    Ok(update) => updates.push(update),
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        should_reset_channel = true;
+                        break;
+                    }
+                }
+            },
+            Err(_) => should_reset_channel = true,
+        }
+    }
+
+    if should_reset_channel {
+        state.version_catalog_results_tx = None;
+        state.version_catalog_results_rx = None;
+        state.version_catalog_in_flight = false;
+    }
+
+    for (include_snapshots_and_betas, result) in updates {
+        state.version_catalog_in_flight = false;
+        match result {
+            Ok(catalog) => apply_version_catalog(state, include_snapshots_and_betas, catalog),
+            Err(err) => apply_version_catalog_error(state, include_snapshots_and_betas, &err),
+        }
+    }
+}
+
+fn ensure_discovery_channel(state: &mut InstanceScreenState) {
+    if state.discover_results_tx.is_some() && state.discover_results_rx.is_some() {
+        return;
+    }
+    let (tx, rx) = mpsc::channel::<(String, Result<UnifiedSearchResult, String>)>();
+    state.discover_results_tx = Some(tx);
+    state.discover_results_rx = Some(Arc::new(Mutex::new(rx)));
+}
+
+fn request_discovery_search(state: &mut InstanceScreenState, query: String) {
+    let query = query.trim().to_owned();
+    if query.is_empty() {
+        state.discover_status = Some("Search query cannot be empty.".to_owned());
+        state.discover_results.clear();
+        state.discover_types.clear();
+        state.discover_warnings.clear();
+        return;
+    }
+    if state.discover_in_flight {
+        return;
+    }
+
+    ensure_discovery_channel(state);
+    let Some(tx) = state.discover_results_tx.as_ref().cloned() else {
+        return;
+    };
+
+    state.discover_in_flight = true;
+    state.discover_status = Some(format!("Searching for \"{query}\"..."));
+    let query_for_search = query.clone();
+    let query_for_result = query.clone();
+    let _ = tokio_runtime::spawn(async move {
+        let result = tokio_runtime::spawn_blocking(move || {
+            search_minecraft_content(query_for_search.as_str(), 25).map_err(|err| err.to_string())
+        })
+        .await
+        .map_err(|err| format!("discover task join error: {err}"))
+        .and_then(|inner| inner);
+        let _ = tx.send((query_for_result, result));
+    });
+}
+
+fn poll_discovery_search(state: &mut InstanceScreenState) {
+    let mut updates = Vec::new();
+    let mut should_reset_channel = false;
+    if let Some(rx) = state.discover_results_rx.as_ref() {
+        match rx.lock() {
+            Ok(receiver) => loop {
+                match receiver.try_recv() {
+                    Ok(update) => updates.push(update),
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        should_reset_channel = true;
+                        break;
+                    }
+                }
+            },
+            Err(_) => should_reset_channel = true,
+        }
+    }
+
+    if should_reset_channel {
+        state.discover_results_tx = None;
+        state.discover_results_rx = None;
+        state.discover_in_flight = false;
+    }
+
+    for (query, result) in updates {
+        state.discover_in_flight = false;
+        match result {
+            Ok(search) => {
+                state.discover_results = search.entries;
+                state.discover_types = search.discovered_types;
+                state.discover_warnings = search.warnings;
+                state.discover_status = Some(format!(
+                    "Loaded {} entries for \"{query}\".",
+                    state.discover_results.len()
+                ));
             }
-
-            let preferred_index = if state.game_version_input.trim().is_empty() {
-                0
-            } else {
-                state
-                    .available_game_versions
-                    .iter()
-                    .position(|entry| entry.id == state.game_version_input)
-                    .unwrap_or(0)
-            };
-            state.selected_game_version_index = preferred_index;
-            if let Some(selected) = state.available_game_versions.get(preferred_index) {
-                state.game_version_input = selected.id.clone();
+            Err(err) => {
+                state.discover_status = Some(format!("Search failed: {err}"));
+                state.discover_results.clear();
+                state.discover_types.clear();
+                state.discover_warnings.clear();
             }
         }
-        Err(err) => {
-            state.version_catalog_error = Some(format!("Failed to fetch version catalog: {err}"));
-            state.available_game_versions.clear();
-            state.loader_support = LoaderSupportIndex::default();
-            state.version_catalog_include_snapshots = Some(include_snapshots_and_betas);
-            state.selected_game_version_index = 0;
-            state.game_version_input.clear();
+    }
+}
+
+fn ensure_runtime_prepare_channel(state: &mut InstanceScreenState) {
+    if state.runtime_prepare_results_tx.is_some() && state.runtime_prepare_results_rx.is_some() {
+        return;
+    }
+    let (tx, rx) = mpsc::channel::<(String, String, Result<GameSetupResult, String>)>();
+    state.runtime_prepare_results_tx = Some(tx);
+    state.runtime_prepare_results_rx = Some(Arc::new(Mutex::new(rx)));
+}
+
+fn request_runtime_prepare(
+    state: &mut InstanceScreenState,
+    instance_root: PathBuf,
+    game_version: String,
+) {
+    let game_version = game_version.trim().to_owned();
+    if game_version.is_empty() || state.runtime_prepare_in_flight {
+        return;
+    }
+
+    ensure_runtime_prepare_channel(state);
+    let Some(tx) = state.runtime_prepare_results_tx.as_ref().cloned() else {
+        return;
+    };
+
+    state.runtime_prepare_in_flight = true;
+    state.status_message = Some(format!("Preparing Minecraft {game_version}..."));
+    let instance_root_display = instance_root.display().to_string();
+    let game_version_for_task = game_version.clone();
+    let game_version_for_result = game_version.clone();
+    let _ = tokio_runtime::spawn(async move {
+        let result = tokio_runtime::spawn_blocking(move || {
+            ensure_game_files(instance_root.as_path(), game_version_for_task.as_str())
+                .map_err(|err| err.to_string())
+        })
+        .await
+        .map_err(|err| format!("runtime prepare task join error: {err}"))
+        .and_then(|inner| inner);
+        let _ = tx.send((game_version_for_result, instance_root_display, result));
+    });
+}
+
+fn poll_runtime_prepare(state: &mut InstanceScreenState) {
+    let mut updates = Vec::new();
+    let mut should_reset_channel = false;
+    if let Some(rx) = state.runtime_prepare_results_rx.as_ref() {
+        match rx.lock() {
+            Ok(receiver) => loop {
+                match receiver.try_recv() {
+                    Ok(update) => updates.push(update),
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        should_reset_channel = true;
+                        break;
+                    }
+                }
+            },
+            Err(_) => should_reset_channel = true,
+        }
+    }
+
+    if should_reset_channel {
+        state.runtime_prepare_results_tx = None;
+        state.runtime_prepare_results_rx = None;
+        state.runtime_prepare_in_flight = false;
+    }
+
+    for (game_version, instance_root_display, result) in updates {
+        state.runtime_prepare_in_flight = false;
+        match result {
+            Ok(setup) => {
+                state.running = true;
+                state.status_message = Some(format!(
+                    "Prepared Minecraft {} in {} ({} file(s) downloaded).",
+                    game_version, instance_root_display, setup.downloaded_files
+                ));
+            }
+            Err(err) => {
+                state.running = false;
+                state.status_message = Some(format!("Failed to prepare game files: {err}"));
+            }
         }
     }
 }

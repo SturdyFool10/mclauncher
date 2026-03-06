@@ -1,17 +1,23 @@
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
+use std::sync::mpsc;
+use std::time::Duration;
 
 use eframe::egui;
 use installation::{
-    LoaderSupportIndex, LoaderVersionIndex, MinecraftVersionEntry, fetch_version_catalog,
+    LoaderSupportIndex, LoaderVersionIndex, MinecraftVersionEntry, VersionCatalog,
+    fetch_version_catalog_with_refresh,
 };
 use textui::{LabelOptions, TextUi};
 
 use crate::ui::components::settings_widgets;
 
+use super::tokio_runtime;
+
 const MODLOADER_OPTIONS: [&str; 6] = ["Vanilla", "Fabric", "Forge", "NeoForge", "Quilt", "Custom"];
 const CUSTOM_MODLOADER_INDEX: usize = MODLOADER_OPTIONS.len() - 1;
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct CreateInstanceState {
     pub name: String,
     pub thumbnail_path: String,
@@ -26,6 +32,15 @@ pub struct CreateInstanceState {
     loader_versions: LoaderVersionIndex,
     version_catalog_include_snapshots: Option<bool>,
     version_catalog_error: Option<String>,
+    version_catalog_in_flight: bool,
+    version_catalog_results_tx: Option<mpsc::Sender<(bool, Result<VersionCatalog, String>)>>,
+    version_catalog_results_rx: Option<mpsc::Receiver<(bool, Result<VersionCatalog, String>)>>,
+    modloader_versions_cache: BTreeMap<String, Vec<String>>,
+    modloader_versions_in_flight: HashSet<String>,
+    modloader_versions_results_tx: Option<mpsc::Sender<(String, Result<Vec<String>, String>)>>,
+    modloader_versions_results_rx: Option<mpsc::Receiver<(String, Result<Vec<String>, String>)>>,
+    modloader_versions_status_key: Option<String>,
+    modloader_versions_status: Option<String>,
 }
 
 impl Default for CreateInstanceState {
@@ -44,6 +59,15 @@ impl Default for CreateInstanceState {
             loader_versions: LoaderVersionIndex::default(),
             version_catalog_include_snapshots: None,
             version_catalog_error: None,
+            version_catalog_in_flight: false,
+            version_catalog_results_tx: None,
+            version_catalog_results_rx: None,
+            modloader_versions_cache: BTreeMap::new(),
+            modloader_versions_in_flight: HashSet::new(),
+            modloader_versions_results_tx: None,
+            modloader_versions_results_rx: None,
+            modloader_versions_status_key: None,
+            modloader_versions_status: None,
         }
     }
 }
@@ -89,7 +113,12 @@ pub fn render(
     include_snapshots_and_betas: bool,
 ) -> ModalAction {
     let mut action = ModalAction::None;
+    poll_version_catalog(state);
     sync_version_catalog(state, include_snapshots_and_betas, false);
+    poll_modloader_versions(state);
+    if state.version_catalog_in_flight || !state.modloader_versions_in_flight.is_empty() {
+        ctx.request_repaint_after(Duration::from_millis(100));
+    }
     let viewport_rect = ctx.input(|i| i.content_rect());
     let modal_max_width = (viewport_rect.width() * 0.90).max(1.0);
     let modal_max_height = (viewport_rect.height() * 0.90).max(1.0);
@@ -191,6 +220,24 @@ pub fn render(
                 .clicked()
             {
                 sync_version_catalog(state, include_snapshots_and_betas, true);
+                state.modloader_versions_cache.clear();
+                state.modloader_versions_status = None;
+                state.modloader_versions_status_key = None;
+            }
+            if state.version_catalog_in_flight {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    let _ = text_ui.label(
+                        ui,
+                        "instance_create_catalog_fetching",
+                        "Fetching version catalog...",
+                        &LabelOptions {
+                            color: ui.visuals().weak_text_color(),
+                            wrap: true,
+                            ..LabelOptions::default()
+                        },
+                    );
+                });
             }
 
             if let Some(catalog_error) = state.version_catalog_error.as_deref() {
@@ -309,36 +356,101 @@ pub fn render(
             }
 
             ui.add_space(6.0);
-            let available_modloader_versions = selected_modloader_versions(
-                state,
+            let selected_modloader_label = selected_modloader_label(state);
+            let modloader_versions_key = modloader_versions_cache_key(
+                selected_modloader_label.as_str(),
                 selected_game_version.as_str(),
             );
-            if !available_modloader_versions.is_empty()
-                && state.selected_modloader != CUSTOM_MODLOADER_INDEX
-                && state.selected_modloader != 0
-            {
+            let available_modloader_versions =
+                selected_modloader_versions(state, selected_game_version.as_str()).to_vec();
+            if state.selected_modloader == 0 {
+                state.modloader_version.clear();
+            } else {
+                let mut resolved_modloader_versions = available_modloader_versions;
+                let should_fetch_remote = state.selected_modloader != CUSTOM_MODLOADER_INDEX
+                    && resolved_modloader_versions.is_empty();
+                if should_fetch_remote {
+                    if let Some(cached) = state.modloader_versions_cache.get(&modloader_versions_key)
+                    {
+                        resolved_modloader_versions = cached.clone();
+                    } else {
+                        request_modloader_versions(
+                            state,
+                            selected_modloader_label.as_str(),
+                            selected_game_version.as_str(),
+                            false,
+                        );
+                    }
+                }
+
+                let in_flight = state
+                    .modloader_versions_in_flight
+                    .contains(&modloader_versions_key);
+                if in_flight {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        let _ = text_ui.label(
+                            ui,
+                            "instance_create_modloader_versions_fetching",
+                            "Fetching modloader versions...",
+                            &LabelOptions {
+                                color: ui.visuals().weak_text_color(),
+                                wrap: true,
+                                ..LabelOptions::default()
+                            },
+                        );
+                    });
+                }
+
+                if state.modloader_versions_status_key.as_deref()
+                    == Some(modloader_versions_key.as_str())
+                    && let Some(status) = state.modloader_versions_status.as_deref()
+                {
+                    let is_error = status.starts_with("Failed");
+                    let _ = text_ui.label(
+                        ui,
+                        "instance_create_modloader_versions_status",
+                        status,
+                        &LabelOptions {
+                            color: if is_error {
+                                ui.visuals().error_fg_color
+                            } else {
+                                ui.visuals().weak_text_color()
+                            },
+                            wrap: true,
+                            ..LabelOptions::default()
+                        },
+                    );
+                }
+
                 let mut modloader_version_options: Vec<String> =
-                    Vec::with_capacity(available_modloader_versions.len() + 1);
+                    Vec::with_capacity(resolved_modloader_versions.len() + 1);
                 modloader_version_options.push("Latest available".to_owned());
-                modloader_version_options.extend_from_slice(available_modloader_versions);
+                modloader_version_options.extend(resolved_modloader_versions.iter().cloned());
+
                 let option_refs: Vec<&str> = modloader_version_options
                     .iter()
                     .map(String::as_str)
                     .collect();
-                let mut selected_index = if state.modloader_version.trim().is_empty() {
+                let current_modloader_version = state.modloader_version.trim().to_owned();
+                let mut selected_index = if current_modloader_version.is_empty() {
                     0
                 } else {
                     modloader_version_options
                         .iter()
-                        .position(|entry| entry == state.modloader_version.trim())
+                        .position(|entry| entry == &current_modloader_version)
                         .unwrap_or(0)
                 };
+                if !current_modloader_version.is_empty() && selected_index == 0 {
+                    state.modloader_version.clear();
+                }
+
                 let changed = settings_widgets::full_width_dropdown_row(
                     text_ui,
                     ui,
                     "instance_create_modloader_version_dropdown",
                     "Modloader version",
-                    Some("Fetched and cached once per day. Pick Latest available for automatic selection."),
+                    Some("Cataloged by loader+Minecraft compatibility and cached once per day. Pick Latest available for automatic selection."),
                     &mut selected_index,
                     &option_refs,
                 )
@@ -350,15 +462,39 @@ pub fn render(
                         state.modloader_version = selected.clone();
                     }
                 }
-            } else {
-                let _ = settings_widgets::full_width_text_input_row(
-                    text_ui,
-                    ui,
-                    "instance_create_modloader_version",
-                    "Modloader version (optional)",
-                    Some("Leave blank to auto/select latest when runtime installation is wired for loader versions."),
-                    &mut state.modloader_version,
-                );
+
+                if resolved_modloader_versions.is_empty()
+                    && state.selected_modloader != CUSTOM_MODLOADER_INDEX
+                {
+                    let _ = text_ui.label(
+                        ui,
+                        "instance_create_modloader_versions_unavailable",
+                        "No cataloged modloader versions were found for this Minecraft version.",
+                        &LabelOptions {
+                            color: ui.visuals().weak_text_color(),
+                            wrap: true,
+                            ..LabelOptions::default()
+                        },
+                    );
+                    if !in_flight
+                        && settings_widgets::full_width_button(
+                            text_ui,
+                            ui,
+                            "instance_create_modloader_versions_retry",
+                            "Retry modloader versions fetch",
+                            ui.available_width().clamp(1.0, 260.0),
+                            false,
+                        )
+                        .clicked()
+                    {
+                        request_modloader_versions(
+                            state,
+                            selected_modloader_label.as_str(),
+                            selected_game_version.as_str(),
+                            true,
+                        );
+                    }
+                }
             }
 
             if let Some(error) = state.error.as_deref() {
@@ -451,46 +587,113 @@ fn sync_version_catalog(
 ) {
     let should_refresh = force_refresh
         || state.version_catalog_include_snapshots != Some(include_snapshots_and_betas)
-        || state.available_game_versions.is_empty();
-    if !should_refresh {
+        || (state.available_game_versions.is_empty() && state.version_catalog_error.is_none());
+    if !should_refresh || state.version_catalog_in_flight {
         return;
     }
 
-    match fetch_version_catalog(include_snapshots_and_betas) {
-        Ok(catalog) => {
-            state.available_game_versions = catalog.game_versions;
-            state.loader_support = catalog.loader_support;
-            state.loader_versions = catalog.loader_versions;
-            state.version_catalog_include_snapshots = Some(include_snapshots_and_betas);
-            state.version_catalog_error = None;
+    ensure_version_catalog_channel(state);
+    let Some(tx) = state.version_catalog_results_tx.as_ref().cloned() else {
+        return;
+    };
 
-            if state.available_game_versions.is_empty() {
-                state.selected_game_version_index = 0;
-                state.game_version.clear();
-            } else {
-                let preferred_index = if state.game_version.trim().is_empty() {
-                    0
-                } else {
-                    state
-                        .available_game_versions
-                        .iter()
-                        .position(|entry| entry.id == state.game_version)
-                        .unwrap_or(0)
-                };
-                state.selected_game_version_index = preferred_index;
-                if let Some(selected) = state.available_game_versions.get(preferred_index) {
-                    state.game_version = selected.id.clone();
+    state.version_catalog_in_flight = true;
+    state.version_catalog_include_snapshots = Some(include_snapshots_and_betas);
+    state.version_catalog_error = None;
+
+    let _ = tokio_runtime::spawn(async move {
+        let result = tokio_runtime::spawn_blocking(move || {
+            fetch_version_catalog_with_refresh(include_snapshots_and_betas, force_refresh)
+                .map_err(|err| err.to_string())
+        })
+        .await
+        .map_err(|err| format!("version catalog task join error: {err}"))
+        .and_then(|inner| inner);
+        let _ = tx.send((include_snapshots_and_betas, result));
+    });
+}
+
+fn ensure_version_catalog_channel(state: &mut CreateInstanceState) {
+    if state.version_catalog_results_tx.is_some() && state.version_catalog_results_rx.is_some() {
+        return;
+    }
+    let (tx, rx) = mpsc::channel::<(bool, Result<VersionCatalog, String>)>();
+    state.version_catalog_results_tx = Some(tx);
+    state.version_catalog_results_rx = Some(rx);
+}
+
+fn apply_version_catalog(
+    state: &mut CreateInstanceState,
+    include_snapshots_and_betas: bool,
+    catalog: VersionCatalog,
+) {
+    state.available_game_versions = catalog.game_versions;
+    state.loader_support = catalog.loader_support;
+    state.loader_versions = catalog.loader_versions;
+    state.version_catalog_include_snapshots = Some(include_snapshots_and_betas);
+    state.version_catalog_error = None;
+
+    if state.available_game_versions.is_empty() {
+        state.selected_game_version_index = 0;
+        state.game_version.clear();
+    } else {
+        let preferred_index = if state.game_version.trim().is_empty() {
+            0
+        } else {
+            state
+                .available_game_versions
+                .iter()
+                .position(|entry| entry.id == state.game_version)
+                .unwrap_or(0)
+        };
+        state.selected_game_version_index = preferred_index;
+        if let Some(selected) = state.available_game_versions.get(preferred_index) {
+            state.game_version = selected.id.clone();
+        }
+    }
+}
+
+fn apply_version_catalog_error(
+    state: &mut CreateInstanceState,
+    include_snapshots_and_betas: bool,
+    error: &str,
+) {
+    state.version_catalog_error = Some(format!("Failed to fetch version catalog: {error}"));
+    state.available_game_versions.clear();
+    state.loader_support = LoaderSupportIndex::default();
+    state.loader_versions = LoaderVersionIndex::default();
+    state.version_catalog_include_snapshots = Some(include_snapshots_and_betas);
+    state.selected_game_version_index = 0;
+    state.game_version.clear();
+}
+
+fn poll_version_catalog(state: &mut CreateInstanceState) {
+    let mut updates = Vec::new();
+    let mut should_reset_channel = false;
+    if let Some(rx) = state.version_catalog_results_rx.as_ref() {
+        loop {
+            match rx.try_recv() {
+                Ok(update) => updates.push(update),
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    should_reset_channel = true;
+                    break;
                 }
             }
         }
-        Err(err) => {
-            state.version_catalog_error = Some(format!("Failed to fetch version catalog: {err}"));
-            state.available_game_versions.clear();
-            state.loader_support = LoaderSupportIndex::default();
-            state.loader_versions = LoaderVersionIndex::default();
-            state.version_catalog_include_snapshots = Some(include_snapshots_and_betas);
-            state.selected_game_version_index = 0;
-            state.game_version.clear();
+    }
+
+    if should_reset_channel {
+        state.version_catalog_results_tx = None;
+        state.version_catalog_results_rx = None;
+        state.version_catalog_in_flight = false;
+    }
+
+    for (include_snapshots_and_betas, result) in updates {
+        state.version_catalog_in_flight = false;
+        match result {
+            Ok(catalog) => apply_version_catalog(state, include_snapshots_and_betas, catalog),
+            Err(err) => apply_version_catalog_error(state, include_snapshots_and_betas, &err),
         }
     }
 }
@@ -633,6 +836,128 @@ fn selected_modloader_versions<'a>(
         .loader_versions
         .versions_for_loader(selected_label, game_version)
         .unwrap_or(&[])
+}
+
+fn selected_modloader_label(state: &CreateInstanceState) -> String {
+    if state.selected_modloader == CUSTOM_MODLOADER_INDEX {
+        state.custom_modloader.trim().to_owned()
+    } else {
+        MODLOADER_OPTIONS
+            .get(state.selected_modloader)
+            .copied()
+            .unwrap_or(MODLOADER_OPTIONS[0])
+            .to_owned()
+    }
+}
+
+fn modloader_versions_cache_key(loader_label: &str, game_version: &str) -> String {
+    format!(
+        "{}|{}",
+        loader_label.trim().to_ascii_lowercase(),
+        game_version.trim()
+    )
+}
+
+fn ensure_modloader_versions_channel(state: &mut CreateInstanceState) {
+    if state.modloader_versions_results_tx.is_some()
+        && state.modloader_versions_results_rx.is_some()
+    {
+        return;
+    }
+    let (tx, rx) = mpsc::channel::<(String, Result<Vec<String>, String>)>();
+    state.modloader_versions_results_tx = Some(tx);
+    state.modloader_versions_results_rx = Some(rx);
+}
+
+fn request_modloader_versions(
+    state: &mut CreateInstanceState,
+    loader_label: &str,
+    game_version: &str,
+    force_refresh: bool,
+) {
+    let loader_label = loader_label.trim();
+    let game_version = game_version.trim();
+    if loader_label.is_empty() || game_version.is_empty() {
+        return;
+    }
+    let key = modloader_versions_cache_key(loader_label, game_version);
+    if force_refresh {
+        state.modloader_versions_cache.remove(&key);
+    } else if state.modloader_versions_cache.contains_key(&key)
+        || state.modloader_versions_in_flight.contains(&key)
+    {
+        return;
+    }
+
+    ensure_modloader_versions_channel(state);
+    let Some(tx) = state.modloader_versions_results_tx.as_ref().cloned() else {
+        return;
+    };
+
+    state.modloader_versions_in_flight.insert(key.clone());
+    state.modloader_versions_status_key = Some(key.clone());
+    state.modloader_versions_status = Some(format!(
+        "Fetching {loader_label} versions for Minecraft {game_version}..."
+    ));
+
+    let loader = loader_label.to_owned();
+    let game = game_version.to_owned();
+    let _ = tokio_runtime::spawn(async move {
+        let result = tokio_runtime::spawn_blocking(move || {
+            installation::fetch_loader_versions_for_game(
+                loader.as_str(),
+                game.as_str(),
+                force_refresh,
+            )
+            .map_err(|err| err.to_string())
+        })
+        .await
+        .map_err(|err| format!("background task join error: {err}"))
+        .and_then(|inner| inner);
+        let _ = tx.send((key, result));
+    });
+}
+
+fn poll_modloader_versions(state: &mut CreateInstanceState) {
+    let mut updates = Vec::new();
+    let mut should_reset_channel = false;
+    if let Some(rx) = state.modloader_versions_results_rx.as_ref() {
+        loop {
+            match rx.try_recv() {
+                Ok(update) => updates.push(update),
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    should_reset_channel = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    if should_reset_channel {
+        state.modloader_versions_results_tx = None;
+        state.modloader_versions_results_rx = None;
+    }
+
+    for (key, result) in updates {
+        state.modloader_versions_in_flight.remove(&key);
+        state.modloader_versions_status_key = Some(key.clone());
+        match result {
+            Ok(versions) => {
+                state.modloader_versions_cache.insert(key, versions.clone());
+                state.modloader_versions_status = if versions.is_empty() {
+                    Some("No modloader versions found for this Minecraft version.".to_owned())
+                } else {
+                    Some(format!("Loaded {} modloader versions.", versions.len()))
+                };
+            }
+            Err(err) => {
+                state.modloader_versions_cache.insert(key, Vec::new());
+                state.modloader_versions_status =
+                    Some(format!("Failed to fetch modloader versions: {err}"));
+            }
+        }
+    }
 }
 
 fn ensure_selected_modloader_is_supported(state: &mut CreateInstanceState, game_version: &str) {

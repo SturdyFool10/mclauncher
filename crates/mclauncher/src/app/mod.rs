@@ -18,6 +18,7 @@ mod config_format_modal;
 mod create_instance_modal;
 mod fonts;
 mod native_options;
+pub(crate) mod tokio_runtime;
 
 struct VertexApp {
     fonts: FontController,
@@ -313,6 +314,7 @@ impl eframe::App for VertexApp {
 }
 
 pub fn run() -> eframe::Result<()> {
+    tokio_runtime::init();
     let config_state = load_config();
     let startup_config = match &config_state {
         LoadConfigResult::Loaded(config) => config.clone(),

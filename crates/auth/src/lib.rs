@@ -6,10 +6,12 @@ use serde_json::json;
 use std::fs;
 use std::io::{self, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
+use tokio::runtime::{Builder, Handle, Runtime};
 use zeroize::Zeroizing;
 
 const OAUTH_BASE_URL: &str = "https://login.microsoftonline.com";
@@ -20,6 +22,21 @@ const MINECRAFT_LOGIN_URL: &str =
 const MINECRAFT_PROFILE_URL: &str = "https://api.minecraftservices.com/minecraft/profile";
 const ACCOUNT_CACHE_DEFAULT_PATH: &str = "account_cache.json";
 const DEVICE_CODE_SCOPE: &str = "XboxLive.signin offline_access";
+static AUTH_TOKIO_RUNTIME: OnceLock<Runtime> = OnceLock::new();
+
+fn auth_runtime() -> &'static Runtime {
+    AUTH_TOKIO_RUNTIME.get_or_init(|| {
+        Builder::new_multi_thread()
+            .enable_all()
+            .thread_name("vertex-auth-tokio")
+            .build()
+            .expect("failed to build auth tokio runtime")
+    })
+}
+
+fn auth_runtime_handle() -> &'static Handle {
+    auth_runtime().handle()
+}
 
 /// Built-in Microsoft OAuth client id used when `VERTEX_MSA_CLIENT_ID` is not set.
 /// Leave empty to force env-based configuration.
@@ -156,12 +173,24 @@ pub enum AuthError {
 }
 
 pub fn start_device_code_login(client_id: impl Into<String>) -> DeviceCodeLoginFlow {
+    if let Ok(handle) = Handle::try_current() {
+        return start_device_code_login_with_handle(client_id, &handle);
+    }
+
+    start_device_code_login_with_handle(client_id, auth_runtime_handle())
+}
+
+pub fn start_device_code_login_with_handle(
+    client_id: impl Into<String>,
+    handle: &Handle,
+) -> DeviceCodeLoginFlow {
     let client_id = client_id.into();
     let (sender, receiver) = mpsc::channel();
+    let sender_for_task = sender.clone();
 
-    thread::spawn(move || {
-        if let Err(err) = run_device_code_login(client_id, &sender) {
-            let _ = sender.send(LoginEvent::Failed(err.to_string()));
+    handle.spawn_blocking(move || {
+        if let Err(err) = run_device_code_login(client_id, &sender_for_task) {
+            let _ = sender_for_task.send(LoginEvent::Failed(err.to_string()));
         }
     });
 

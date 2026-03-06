@@ -10,4 +10,5 @@ thiserror.workspace = true
 image.workspace = true
 base64 = "0.22.1"
 ureq = { version = "2.12.1", features = ["json"] }
+tokio.workspace = true
 zeroize = "1.8.2"

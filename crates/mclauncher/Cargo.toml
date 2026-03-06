@@ -16,6 +16,7 @@ auth.workspace = true
 instances.workspace = true
 modprovider.workspace = true
 installation.workspace = true
+tokio.workspace = true
 raw-window-handle = "0.6.2"
 toml.workspace = true
 rfd = "0.15.4"

@@ -1,6 +1,8 @@
 use auth::{CachedAccount, DeviceCodeLoginFlow, DeviceCodePrompt, LoginEvent};
 use std::time::Duration;
 
+use super::tokio_runtime;
+
 pub const REPAINT_INTERVAL: Duration = Duration::from_millis(200);
 
 #[derive(Clone, Debug)]
@@ -117,7 +119,10 @@ impl AuthState {
 
         self.device_prompt = None;
         self.status = AuthUiStatus::Starting;
-        self.flow = Some(auth::start_device_code_login(client_id));
+        self.flow = Some(auth::start_device_code_login_with_handle(
+            client_id,
+            tokio_runtime::handle(),
+        ));
     }
 
     pub fn sign_out(&mut self) {
