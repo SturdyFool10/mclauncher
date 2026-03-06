@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+egui.workspace = true # works with 0.33.x
 cosmic-text = "0.18.2"
 glyphon = "0.10.0"
 pulldown-cmark = "0.13.1"

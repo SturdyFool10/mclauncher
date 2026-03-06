@@ -11,3 +11,4 @@ serde.workspace = true
 wgpu.workspace = true
 fontloader.workspace = true
 config.workspace = true
+textui.workspace = true

@@ -4,7 +4,7 @@ pub fn svg(
     ui: &mut Ui,
     icon_id: &str,
     svg_bytes: &'static [u8],
-    tooltip: &str,
+    _tooltip: &str,
     selected: bool,
     max_button_width: f32,
 ) -> Response {
@@ -33,7 +33,6 @@ pub fn svg(
         });
 
     ui.add_sized([button_size, button_size], button)
-        .on_hover_text(tooltip)
 }
 
 fn apply_text_color(svg_bytes: &[u8], color: Color32) -> Vec<u8> {

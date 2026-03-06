@@ -5,6 +5,7 @@ use config::{
 use eframe::{self, egui};
 use egui::CentralPanel;
 use fontloader::{FontCatalog, FontSpec, Slant, Stretch, Weight};
+use textui::{ButtonOptions, LabelOptions, TextUi};
 
 mod assets;
 mod screens;
@@ -32,6 +33,7 @@ struct VertexApp {
     active_screen: screens::AppScreen,
     profile_shortcuts: Vec<ui::sidebar::ProfileShortcut>,
     selected_profile_id: Option<String>,
+    text_ui: TextUi,
 }
 
 impl VertexApp {
@@ -52,6 +54,8 @@ impl VertexApp {
         let mut cat = FontCatalog::new();
         cat.load_system();
         let available_ui_fonts = detect_available_ui_fonts(&cat);
+        let mut text_ui = TextUi::new();
+        text_ui.register_font_data(MAPLE_MONO_NF_REGULAR_TTF.to_vec());
         let mut app = Self {
             font_catalog: cat,
             available_ui_fonts,
@@ -65,6 +69,7 @@ impl VertexApp {
             active_screen: screens::AppScreen::Library,
             profile_shortcuts: Vec::new(),
             selected_profile_id: None,
+            text_ui,
         };
         app.ensure_selected_font_is_available();
         app.apply_ui_font_from_config(&cc.egui_ctx);
@@ -97,6 +102,7 @@ impl VertexApp {
             return;
         }
 
+        let mut applied_family = desired.family;
         if desired.family.is_included_default() {
             Self::install_included_maple_font(ctx, desired.size);
         } else {
@@ -118,9 +124,15 @@ impl VertexApp {
                     desired.family.label(),
                 );
                 Self::install_included_maple_font(ctx, desired.size);
+                applied_family = UiFontFamily::MapleMonoNf;
             }
         }
 
+        self.text_ui.apply_typography(
+            applied_family.query_families(),
+            desired.size,
+            desired.weight,
+        );
         self.applied_font_signature = Some(desired);
     }
 
@@ -145,35 +157,87 @@ impl VertexApp {
     }
 
     fn render_config_format_modal(&mut self, ctx: &egui::Context) {
-        egui::Window::new("Select config format")
+        egui::Window::new("")
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .collapsible(false)
             .resizable(false)
             .movable(false)
+            .title_bar(false)
             .show(ctx, |ui| {
                 ui.set_min_width(360.0);
-                ui.heading("Config format");
+                let text_color = ui.visuals().text_color();
+                let heading = LabelOptions {
+                    font_size: 28.0,
+                    line_height: 32.0,
+                    weight: 700,
+                    color: text_color,
+                    wrap: false,
+                    ..LabelOptions::default()
+                };
+                let body = LabelOptions {
+                    color: text_color,
+                    ..LabelOptions::default()
+                };
+                let _ = self
+                    .text_ui
+                    .label(ui, "config_modal_heading", "Config format", &heading);
                 ui.add_space(8.0);
 
-                ui.radio_value(
-                    &mut self.selected_config_format,
-                    ConfigFormat::Toml,
-                    ConfigFormat::Toml.label(),
-                );
-                ui.radio_value(
-                    &mut self.selected_config_format,
-                    ConfigFormat::Json,
-                    ConfigFormat::Json.label(),
-                );
+                let radio_style = ButtonOptions {
+                    min_size: egui::vec2(ui.available_width(), 32.0),
+                    corner_radius: 6,
+                    padding: egui::vec2(8.0, 4.0),
+                    text_color: text_color,
+                    fill: ui.visuals().widgets.inactive.bg_fill,
+                    fill_hovered: ui.visuals().widgets.hovered.bg_fill,
+                    fill_active: ui.visuals().widgets.active.bg_fill,
+                    fill_selected: ui.visuals().selection.bg_fill,
+                    stroke: ui.visuals().widgets.inactive.bg_stroke,
+                    ..ButtonOptions::default()
+                };
+                if self
+                    .text_ui
+                    .selectable_button(
+                        ui,
+                        "config_modal_fmt_toml",
+                        ConfigFormat::Toml.label(),
+                        self.selected_config_format == ConfigFormat::Toml,
+                        &radio_style,
+                    )
+                    .clicked()
+                {
+                    self.selected_config_format = ConfigFormat::Toml;
+                }
+                ui.add_space(4.0);
+                if self
+                    .text_ui
+                    .selectable_button(
+                        ui,
+                        "config_modal_fmt_json",
+                        ConfigFormat::Json.label(),
+                        self.selected_config_format == ConfigFormat::Json,
+                        &radio_style,
+                    )
+                    .clicked()
+                {
+                    self.selected_config_format = ConfigFormat::Json;
+                }
 
                 ui.add_space(12.0);
                 ui.separator();
                 ui.add_space(8.0);
-                ui.label("Choose a format to create your initial launcher config.");
+                let _ = self.text_ui.label(
+                    ui,
+                    "config_modal_desc",
+                    "Choose a format to create your initial launcher config.",
+                    &body,
+                );
 
                 if let Some(err) = &self.config_creation_error {
                     ui.add_space(6.0);
-                    ui.colored_label(egui::Color32::from_rgb(220, 80, 80), err);
+                    let mut err_style = body.clone();
+                    err_style.color = ui.visuals().error_fg_color;
+                    let _ = self.text_ui.label(ui, "config_modal_err", err, &err_style);
                 }
 
                 ui.add_space(12.0);
@@ -181,11 +245,33 @@ impl VertexApp {
                 let mut cancel_clicked = false;
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    create_clicked = ui
-                        .add_sized([120.0, 28.0], egui::Button::new("Create config"))
+                    let create_style = ButtonOptions {
+                        min_size: egui::vec2(120.0, 30.0),
+                        text_color: text_color,
+                        fill: ui.visuals().widgets.inactive.bg_fill,
+                        fill_hovered: ui.visuals().widgets.hovered.bg_fill,
+                        fill_active: ui.visuals().widgets.active.bg_fill,
+                        fill_selected: ui.visuals().selection.bg_fill,
+                        stroke: ui.visuals().widgets.inactive.bg_stroke,
+                        ..ButtonOptions::default()
+                    };
+                    let cancel_style = ButtonOptions {
+                        min_size: egui::vec2(90.0, 30.0),
+                        text_color: text_color,
+                        fill: ui.visuals().widgets.inactive.bg_fill,
+                        fill_hovered: ui.visuals().widgets.hovered.bg_fill,
+                        fill_active: ui.visuals().widgets.active.bg_fill,
+                        fill_selected: ui.visuals().selection.bg_fill,
+                        stroke: ui.visuals().widgets.inactive.bg_stroke,
+                        ..ButtonOptions::default()
+                    };
+                    create_clicked = self
+                        .text_ui
+                        .button(ui, "config_modal_create", "Create config", &create_style)
                         .clicked();
-                    cancel_clicked = ui
-                        .add_sized([90.0, 28.0], egui::Button::new("Cancel"))
+                    cancel_clicked = self
+                        .text_ui
+                        .button(ui, "config_modal_cancel", "Cancel", &cancel_style)
                         .clicked();
                 });
 
@@ -200,10 +286,11 @@ impl VertexApp {
 
 impl eframe::App for VertexApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.text_ui.begin_frame(ctx);
         self.theme.apply(ctx);
         self.ensure_selected_font_is_available();
         self.apply_ui_font_from_config(ctx);
-        ui::top_bar::render(ctx, self.active_screen);
+        ui::top_bar::render(ctx, self.active_screen, &mut self.text_ui);
 
         let previous_config = self.config.clone();
         let modal_open = self.show_config_format_modal;
@@ -235,6 +322,7 @@ impl eframe::App for VertexApp {
                     self.selected_profile_id.as_deref(),
                     &mut self.config,
                     &self.available_ui_fonts,
+                    &mut self.text_ui,
                 );
             });
 

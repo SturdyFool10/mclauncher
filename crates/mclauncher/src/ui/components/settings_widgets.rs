@@ -1,6 +1,7 @@
 use std::hash::Hash;
 
-use egui::{self, Align, Layout, Response, Sense, TextEdit, Ui};
+use egui::{self, Align, Layout, Response, Sense, Ui};
+use textui::{ButtonOptions, InputOptions, LabelOptions, TextUi, TooltipOptions};
 
 use crate::{assets, ui::components::icon_button};
 
@@ -28,15 +29,18 @@ struct IntInputState {
 }
 
 pub fn toggle_row(
+    text_ui: &mut TextUi,
     ui: &mut Ui,
     label: &str,
     info_tooltip: Option<&str>,
     value: &mut bool,
 ) -> Response {
     let metrics = control_metrics(ui);
+    let label_options = row_label_options(ui);
 
     ui.horizontal(|ui| {
-        let mut label_response = ui.add(egui::Label::new(label).sense(Sense::click()));
+        let mut label_response =
+            text_ui.clickable_label(ui, ("toggle_label", label), label, &label_options);
         if label_response.clicked() {
             *value = !*value;
             label_response.mark_changed();
@@ -44,7 +48,7 @@ pub fn toggle_row(
 
         if info_tooltip.is_some() {
             ui.add_space(6.0);
-            info_hint(ui, info_tooltip);
+            info_hint(text_ui, ui, ("toggle_info", label), info_tooltip);
         }
 
         let switch_response = ui
@@ -61,6 +65,7 @@ pub fn toggle_row(
 }
 
 pub fn dropdown_row(
+    text_ui: &mut TextUi,
     ui: &mut Ui,
     id_source: impl Hash,
     label: &str,
@@ -69,13 +74,14 @@ pub fn dropdown_row(
     options: &[&str],
 ) -> Response {
     let metrics = control_metrics(ui);
+    let label_options = row_label_options(ui);
 
     ui.horizontal(|ui| {
-        let label_response = ui.label(label);
+        let label_response = text_ui.label(ui, ("dropdown_label", label), label, &label_options);
 
         if info_tooltip.is_some() {
             ui.add_space(6.0);
-            info_hint(ui, info_tooltip);
+            info_hint(text_ui, ui, ("dropdown_info", label), info_tooltip);
         }
 
         let dropdown_response = ui
@@ -83,7 +89,7 @@ pub fn dropdown_row(
                 ui.spacing_mut().item_spacing.x = 0.0;
                 ui.add_space(metrics.right_padding);
                 ui.push_id(id_source, |ui| {
-                    dropdown(ui, selected_index, options, metrics)
+                    dropdown(text_ui, ui, selected_index, options, metrics)
                 })
                 .inner
             })
@@ -95,6 +101,7 @@ pub fn dropdown_row(
 }
 
 pub fn float_stepper_row(
+    text_ui: &mut TextUi,
     ui: &mut Ui,
     id_source: impl Hash,
     label: &str,
@@ -107,6 +114,8 @@ pub fn float_stepper_row(
     let metrics = control_metrics(ui);
     let id = ui.make_persistent_id(id_source);
     let input_id = id.with("float_input");
+    let focus_id = input_id.with("textui_input");
+    let label_options = row_label_options(ui);
 
     let mut state = ui
         .ctx()
@@ -116,18 +125,18 @@ pub fn float_stepper_row(
             last_valid: *value,
         });
 
-    if !ui.memory(|m| m.has_focus(input_id)) {
+    if !ui.memory(|m| m.has_focus(focus_id)) {
         state.last_valid = *value;
         state.text = format_float(*value);
     }
 
     let row_response = ui
         .horizontal(|ui| {
-            let label_response = ui.label(label);
+            let label_response = text_ui.label(ui, ("float_label", label), label, &label_options);
 
             if info_tooltip.is_some() {
                 ui.add_space(6.0);
-                info_hint(ui, info_tooltip);
+                info_hint(text_ui, ui, ("float_info", label), info_tooltip);
             }
 
             let (controls_response, text_response, plus_clicked, minus_clicked) = ui
@@ -139,12 +148,10 @@ pub fn float_stepper_row(
                         step_button(ui, "float_plus", assets::PLUS_SVG, "Increase", metrics);
                     ui.add_space(metrics.control_gap);
 
-                    let text_response = ui.add_sized(
-                        [metrics.number_input_width, metrics.control_height],
-                        TextEdit::singleline(&mut state.text)
-                            .id(input_id)
-                            .horizontal_align(Align::Center),
-                    );
+                    let mut input_options = number_input_options(ui, metrics);
+                    input_options.desired_width = Some(metrics.number_input_width);
+                    let text_response =
+                        text_ui.singleline_input(ui, input_id, &mut state.text, &input_options);
                     ui.add_space(metrics.control_gap);
 
                     let minus_response =
@@ -206,6 +213,7 @@ pub fn float_stepper_row(
 }
 
 pub fn int_stepper_row(
+    text_ui: &mut TextUi,
     ui: &mut Ui,
     id_source: impl Hash,
     label: &str,
@@ -218,6 +226,8 @@ pub fn int_stepper_row(
     let metrics = control_metrics(ui);
     let id = ui.make_persistent_id(id_source);
     let input_id = id.with("int_input");
+    let focus_id = input_id.with("textui_input");
+    let label_options = row_label_options(ui);
 
     let mut state = ui
         .ctx()
@@ -227,18 +237,18 @@ pub fn int_stepper_row(
             last_valid: *value,
         });
 
-    if !ui.memory(|m| m.has_focus(input_id)) {
+    if !ui.memory(|m| m.has_focus(focus_id)) {
         state.last_valid = *value;
         state.text = value.to_string();
     }
 
     let row_response = ui
         .horizontal(|ui| {
-            let label_response = ui.label(label);
+            let label_response = text_ui.label(ui, ("int_label", label), label, &label_options);
 
             if info_tooltip.is_some() {
                 ui.add_space(6.0);
-                info_hint(ui, info_tooltip);
+                info_hint(text_ui, ui, ("int_info", label), info_tooltip);
             }
 
             let (controls_response, text_response, plus_clicked, minus_clicked) = ui
@@ -250,12 +260,10 @@ pub fn int_stepper_row(
                         step_button(ui, "int_plus", assets::PLUS_SVG, "Increase", metrics);
                     ui.add_space(metrics.control_gap);
 
-                    let text_response = ui.add_sized(
-                        [metrics.number_input_width, metrics.control_height],
-                        TextEdit::singleline(&mut state.text)
-                            .id(input_id)
-                            .horizontal_align(Align::Center),
-                    );
+                    let mut input_options = number_input_options(ui, metrics);
+                    input_options.desired_width = Some(metrics.number_input_width);
+                    let text_response =
+                        text_ui.singleline_input(ui, input_id, &mut state.text, &input_options);
                     ui.add_space(metrics.control_gap);
 
                     let minus_response =
@@ -316,7 +324,12 @@ pub fn int_stepper_row(
     row_response
 }
 
-pub fn info_hint(ui: &mut Ui, tooltip: Option<&str>) -> Response {
+pub fn info_hint(
+    text_ui: &mut TextUi,
+    ui: &mut Ui,
+    id_source: impl Hash,
+    tooltip: Option<&str>,
+) -> Response {
     let metrics = control_metrics(ui);
     let icon = themed_svg_image(
         "settings-info-circle",
@@ -329,10 +342,13 @@ pub fn info_hint(ui: &mut Ui, tooltip: Option<&str>) -> Response {
 
     let response = ui.add(icon);
     if let Some(text) = tooltip {
-        response.on_hover_text(text)
-    } else {
-        response
+        let mut tooltip_options = TooltipOptions::default();
+        tooltip_options.text.color = ui.visuals().text_color();
+        tooltip_options.background = ui.visuals().widgets.noninteractive.bg_fill;
+        tooltip_options.stroke = ui.visuals().widgets.noninteractive.bg_stroke;
+        text_ui.tooltip_for_response(ui, id_source, &response, text, &tooltip_options);
     }
+    response
 }
 
 fn switch(ui: &mut Ui, value: &mut bool, metrics: ControlMetrics) -> Response {
@@ -401,49 +417,131 @@ fn step_button(
 }
 
 fn dropdown(
+    text_ui: &mut TextUi,
     ui: &mut Ui,
     selected_index: &mut usize,
     options: &[&str],
     metrics: ControlMetrics,
 ) -> Response {
-    let selected_text = options.get(*selected_index).copied().unwrap_or("Select...");
-    let selected_text =
-        truncate_button_text_with_ellipsis(ui, selected_text, dropdown_text_budget(ui, metrics));
-    let icon = themed_svg_image(
-        "settings-dropdown-chevron",
-        assets::CHEVRON_DOWN_SVG,
-        metrics.icon_size,
-        ui.visuals().text_color(),
-    )
-    .fit_to_exact_size(egui::vec2(metrics.icon_size, metrics.icon_size));
+    let open_id = ui.id().with("settings_dropdown_open");
 
-    let button = egui::Button::image_and_text(icon, selected_text)
-        .min_size(egui::vec2(metrics.dropdown_width, metrics.control_height))
-        .frame(true);
+    let mut label_style = row_label_options(ui);
+    label_style.wrap = false;
 
-    let (mut response, popup) =
-        egui::containers::menu::MenuButton::from_button(button).ui(ui, |ui| {
-            let mut changed = false;
+    let selected_text_raw = options.get(*selected_index).copied().unwrap_or("Select...");
+    let selected_text = truncate_button_text_with_ellipsis(
+        text_ui,
+        ui,
+        selected_text_raw,
+        dropdown_text_budget(metrics),
+        &label_style,
+    );
+
+    let (button_rect, mut response) = ui.allocate_exact_size(
+        egui::vec2(metrics.dropdown_width, metrics.control_height),
+        Sense::click(),
+    );
+
+    let mut interacted = ui.style().interact(&response);
+    let mut text_color = interacted.text_color();
+
+    let popup_response = egui::Popup::menu(&response)
+        .id(open_id)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
             ui.set_min_width(metrics.dropdown_width);
 
+            let mut popup_changed = false;
+            let button_options = ButtonOptions {
+                min_size: egui::vec2(metrics.dropdown_width - 4.0, metrics.control_height),
+                corner_radius: 4,
+                padding: egui::vec2(8.0, 4.0),
+                text_color: ui.visuals().text_color(),
+                fill: ui.visuals().widgets.inactive.bg_fill,
+                fill_hovered: ui.visuals().widgets.hovered.bg_fill,
+                fill_active: ui.visuals().widgets.active.bg_fill,
+                fill_selected: ui.visuals().selection.bg_fill,
+                stroke: ui.visuals().widgets.inactive.bg_stroke,
+                ..ButtonOptions::default()
+            };
+
             for (index, option) in options.iter().enumerate() {
-                if ui
-                    .selectable_label(*selected_index == index, *option)
-                    .clicked()
-                {
+                let option_text = truncate_button_text_with_ellipsis(
+                    text_ui,
+                    ui,
+                    option,
+                    dropdown_text_budget(metrics),
+                    &label_style,
+                );
+                let option_response = text_ui.selectable_button(
+                    ui,
+                    ("dropdown_option", index),
+                    &option_text,
+                    *selected_index == index,
+                    &button_options,
+                );
+                if option_response.clicked() {
                     *selected_index = index;
-                    changed = true;
-                    ui.close();
+                    popup_changed = true;
+                    egui::Popup::close_id(ui.ctx(), open_id);
                 }
             }
 
-            changed
+            popup_changed
         });
 
-    if let Some(inner) = popup {
-        if inner.inner {
-            response.mark_changed();
-        }
+    let is_open = egui::Popup::is_id_open(ui.ctx(), open_id);
+    if is_open {
+        interacted = &ui.visuals().widgets.open;
+        text_color = interacted.text_color();
+    }
+
+    ui.painter().rect(
+        button_rect,
+        6.0,
+        interacted.bg_fill,
+        interacted.bg_stroke,
+        egui::StrokeKind::Inside,
+    );
+
+    let icon_bytes = if is_open {
+        assets::CHEVRON_UP_SVG
+    } else {
+        assets::CHEVRON_DOWN_SVG
+    };
+    let icon = themed_svg_image(
+        "settings-dropdown-chevron",
+        icon_bytes,
+        metrics.icon_size,
+        text_color,
+    )
+    .fit_to_exact_size(egui::vec2(metrics.icon_size, metrics.icon_size));
+    let icon_rect = egui::Rect::from_min_size(
+        egui::pos2(
+            button_rect.right() - metrics.icon_size - 8.0,
+            button_rect.center().y - metrics.icon_size * 0.5,
+        ),
+        egui::vec2(metrics.icon_size, metrics.icon_size),
+    );
+    ui.put(icon_rect, icon);
+
+    label_style.color = text_color;
+    let text_rect = egui::Rect::from_min_max(
+        egui::pos2(button_rect.left() + 8.0, button_rect.top()),
+        egui::pos2(icon_rect.left() - 6.0, button_rect.bottom()),
+    );
+    ui.scope_builder(egui::UiBuilder::new().max_rect(text_rect), |ui| {
+        ui.set_clip_rect(text_rect);
+        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+            let _ = text_ui.label(ui, "dropdown_selected_text", &selected_text, &label_style);
+        });
+    });
+    if popup_response
+        .as_ref()
+        .map(|inner| inner.inner)
+        .unwrap_or(false)
+    {
+        response.mark_changed();
     }
 
     response
@@ -529,6 +627,41 @@ fn format_float(value: f32) -> String {
     formatted
 }
 
+fn row_label_options(ui: &Ui) -> LabelOptions {
+    LabelOptions {
+        font_size: 18.0,
+        line_height: 24.0,
+        color: ui.visuals().text_color(),
+        wrap: false,
+        ..LabelOptions::default()
+    }
+}
+
+fn number_input_options(ui: &Ui, metrics: ControlMetrics) -> InputOptions {
+    let selection = ui.visuals().selection.bg_fill;
+    InputOptions {
+        font_size: 17.0,
+        line_height: 22.0,
+        text_color: ui.visuals().text_color(),
+        cursor_color: ui.visuals().text_cursor.stroke.color,
+        selection_color: egui::Color32::from_rgba_premultiplied(
+            selection.r(),
+            selection.g(),
+            selection.b(),
+            92,
+        ),
+        selected_text_color: ui.visuals().text_color(),
+        background_color: ui.visuals().widgets.inactive.bg_fill,
+        stroke: ui.visuals().widgets.inactive.bg_stroke,
+        desired_rows: 1,
+        desired_width: Some(metrics.number_input_width),
+        min_width: metrics.number_input_width,
+        monospace: true,
+        padding: egui::vec2(6.0, 4.0),
+        ..InputOptions::default()
+    }
+}
+
 fn control_metrics(ui: &Ui) -> ControlMetrics {
     let viewport_width = ui.ctx().input(|i| i.content_rect().width()).max(320.0);
     let text_height = ui.text_style_height(&egui::TextStyle::Body).max(14.0);
@@ -550,13 +683,20 @@ fn control_metrics(ui: &Ui) -> ControlMetrics {
     }
 }
 
-fn dropdown_text_budget(ui: &Ui, metrics: ControlMetrics) -> f32 {
-    let horizontal_padding = ui.spacing().button_padding.x * 2.0;
-    let icon_gap = ui.spacing().item_spacing.x;
-    (metrics.dropdown_width - metrics.icon_size - horizontal_padding - icon_gap).max(0.0)
+fn dropdown_text_budget(metrics: ControlMetrics) -> f32 {
+    let left_padding = 8.0;
+    let right_padding = 8.0;
+    let icon_gap = 6.0;
+    (metrics.dropdown_width - metrics.icon_size - left_padding - right_padding - icon_gap).max(0.0)
 }
 
-fn truncate_button_text_with_ellipsis(ui: &Ui, text: &str, max_width: f32) -> String {
+fn truncate_button_text_with_ellipsis(
+    text_ui: &mut TextUi,
+    ui: &Ui,
+    text: &str,
+    max_width: f32,
+    label_options: &LabelOptions,
+) -> String {
     if text.is_empty() {
         return String::new();
     }
@@ -565,15 +705,8 @@ fn truncate_button_text_with_ellipsis(ui: &Ui, text: &str, max_width: f32) -> St
         return "...".to_owned();
     }
 
-    let font_id = egui::TextStyle::Button.resolve(ui.style());
-    let text_color = ui.visuals().text_color();
-
-    let measure_width = |candidate: &str| -> f32 {
-        ui.painter()
-            .layout_no_wrap(candidate.to_owned(), font_id.clone(), text_color)
-            .size()
-            .x
-    };
+    let mut measure_width =
+        |candidate: &str| -> f32 { text_ui.measure_text_size(ui, candidate, label_options).x };
 
     if measure_width(text) <= max_width {
         return text.to_owned();

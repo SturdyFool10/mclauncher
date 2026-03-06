@@ -1,19 +1,22 @@
 use config::{Config, DropdownSettingId, UiFontFamily};
 use egui::Ui;
+use textui::TextUi;
 
 use crate::ui::components::settings_widgets;
 
-pub fn render(ui: &mut Ui, config: &mut Config, available_ui_fonts: &[UiFontFamily]) {
-    ui.heading("Settings");
-    ui.add_space(8.0);
-    ui.label("Launcher settings and preferences.");
+pub fn render(
+    ui: &mut Ui,
+    text_ui: &mut TextUi,
+    config: &mut Config,
+    available_ui_fonts: &[UiFontFamily],
+) {
     ui.add_space(10.0);
     ui.separator();
     ui.add_space(10.0);
 
     config.for_each_toggle_mut(|setting, value| {
         ui.push_id(setting.id, |ui| {
-            settings_widgets::toggle_row(ui, setting.label, setting.info_tooltip, value);
+            settings_widgets::toggle_row(text_ui, ui, setting.label, setting.info_tooltip, value);
         });
         ui.add_space(8.0);
     });
@@ -41,6 +44,7 @@ pub fn render(ui: &mut Ui, config: &mut Config, available_ui_fonts: &[UiFontFami
                 .unwrap_or(0);
 
             let response = settings_widgets::dropdown_row(
+                text_ui,
                 ui,
                 setting.id,
                 setting.label,
@@ -61,6 +65,7 @@ pub fn render(ui: &mut Ui, config: &mut Config, available_ui_fonts: &[UiFontFami
     config.for_each_float_mut(|setting, value| {
         ui.push_id(setting.id, |ui| {
             settings_widgets::float_stepper_row(
+                text_ui,
                 ui,
                 setting.id,
                 setting.label,
@@ -77,6 +82,7 @@ pub fn render(ui: &mut Ui, config: &mut Config, available_ui_fonts: &[UiFontFami
     config.for_each_int_mut(|setting, value| {
         ui.push_id(setting.id, |ui| {
             settings_widgets::int_stepper_row(
+                text_ui,
                 ui,
                 setting.id,
                 setting.label,

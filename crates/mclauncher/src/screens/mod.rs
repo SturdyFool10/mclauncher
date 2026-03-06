@@ -1,5 +1,6 @@
 use config::{Config, UiFontFamily};
 use egui::Ui;
+use textui::TextUi;
 
 mod legal;
 mod library;
@@ -38,11 +39,12 @@ pub fn render(
     selected_profile_id: Option<&str>,
     config: &mut Config,
     available_ui_fonts: &[UiFontFamily],
+    text_ui: &mut TextUi,
 ) {
     match screen {
-        AppScreen::Library => library::render(ui, selected_profile_id),
-        AppScreen::Skins => skins::render(ui, selected_profile_id),
-        AppScreen::Settings => settings::render(ui, config, available_ui_fonts),
-        AppScreen::Legal => legal::render(ui),
+        AppScreen::Library => library::render(ui, text_ui, selected_profile_id),
+        AppScreen::Skins => skins::render(ui, text_ui, selected_profile_id),
+        AppScreen::Settings => settings::render(ui, text_ui, config, available_ui_fonts),
+        AppScreen::Legal => legal::render(ui, text_ui),
     }
 }

@@ -40,6 +40,7 @@ serverbrowser = { path = "crates/serverbrowser" }
 servermanager = { path = "crates/servermanager" }
 serverprotocol = { path = "crates/serverprotocol" }
 fontloader = { path = "crates/fontloader" }
+textui = { path = "crates/textui" }
 
 [profile.dev]
 # Your crates (workspace members): keep normal dev behavior

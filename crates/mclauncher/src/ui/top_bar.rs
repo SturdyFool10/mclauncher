@@ -1,7 +1,8 @@
 use egui::{
-    self, Align, Context, CursorIcon, Layout, ResizeDirection, RichText, Sense, TopBottomPanel,
+    self, Align, Context, CursorIcon, Layout, ResizeDirection, Sense, TopBottomPanel,
     ViewportCommand,
 };
+use textui::{LabelOptions, TextUi};
 
 use crate::{assets, screens::AppScreen, ui::components::icon_button};
 
@@ -12,7 +13,7 @@ const CONTROL_GAP: f32 = 7.0;
 const CONTROL_GROUP_PADDING: f32 = 12.0;
 const RESIZE_GRAB_THICKNESS: f32 = 6.0;
 
-pub fn render(ctx: &Context, active_screen: AppScreen) {
+pub fn render(ctx: &Context, active_screen: AppScreen, text_ui: &mut TextUi) {
     TopBottomPanel::top("window_top_bar")
         .exact_height(TOP_BAR_HEIGHT)
         .resizable(false)
@@ -53,9 +54,30 @@ pub fn render(ctx: &Context, active_screen: AppScreen) {
             ui.scope_builder(egui::UiBuilder::new().max_rect(drag_rect), |ui| {
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                     ui.add_space(10.0);
-                    ui.label(RichText::new("Minecraft Launcher").strong());
+                    let text_color = ui.visuals().text_color();
+                    let title_style = LabelOptions {
+                        font_size: 30.0,
+                        line_height: 34.0,
+                        weight: 700,
+                        color: text_color,
+                        wrap: false,
+                        ..LabelOptions::default()
+                    };
+                    let _ = text_ui.label(ui, "topbar_title", "Minecraft Launcher", &title_style);
                     ui.add_space(12.0);
-                    ui.colored_label(ui.visuals().weak_text_color(), active_screen.label());
+                    let mut section_style = LabelOptions {
+                        font_size: 18.0,
+                        line_height: 24.0,
+                        wrap: false,
+                        ..LabelOptions::default()
+                    };
+                    section_style.color = ui.visuals().weak_text_color();
+                    let _ = text_ui.label(
+                        ui,
+                        ("topbar_screen", active_screen.label()),
+                        active_screen.label(),
+                        &section_style,
+                    );
                 });
             });
 
