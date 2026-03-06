@@ -28,6 +28,12 @@ struct IntInputState {
     last_valid: i32,
 }
 
+#[derive(Clone, Debug)]
+struct U128InputState {
+    text: String,
+    last_valid: u128,
+}
+
 pub fn toggle_row(
     text_ui: &mut TextUi,
     ui: &mut Ui,
@@ -358,6 +364,229 @@ pub fn text_input_row(
     .inner
 }
 
+pub fn full_width_text_input_row(
+    text_ui: &mut TextUi,
+    ui: &mut Ui,
+    id_source: impl Hash,
+    label: &str,
+    info_tooltip: Option<&str>,
+    value: &mut String,
+) -> Response {
+    let metrics = control_metrics(ui);
+    let label_options = row_label_options(ui);
+    let input_id = ui
+        .make_persistent_id(id_source)
+        .with("full_width_text_input");
+
+    ui.vertical(|ui| {
+        let label_response = ui
+            .horizontal(|ui| {
+                let label_response =
+                    text_ui.label(ui, ("full_width_text_label", label), label, &label_options);
+                if info_tooltip.is_some() {
+                    ui.add_space(6.0);
+                    info_hint(text_ui, ui, ("full_width_text_info", label), info_tooltip);
+                }
+                label_response
+            })
+            .inner;
+
+        let mut input_options = text_input_options(ui, metrics);
+        let input_width = ui.available_width().max(120.0);
+        input_options.desired_width = Some(input_width);
+        input_options.min_width = input_width;
+        let input_response = text_ui.singleline_input(ui, input_id, value, &input_options);
+
+        label_response.union(input_response)
+    })
+    .inner
+}
+
+pub fn u128_slider_with_input_row(
+    text_ui: &mut TextUi,
+    ui: &mut Ui,
+    id_source: impl Hash,
+    label: &str,
+    info_tooltip: Option<&str>,
+    value: &mut u128,
+    min: u128,
+    max: u128,
+    step: u128,
+) -> Response {
+    let metrics = control_metrics(ui);
+    let label_options = row_label_options(ui);
+    let id = ui.make_persistent_id(id_source);
+    let input_id = id.with("u128_slider_input");
+    let full_width = ui.available_width().max(220.0);
+
+    *value = (*value).clamp(min, max);
+
+    let mut state = ui
+        .ctx()
+        .data_mut(|d| d.get_temp::<U128InputState>(id))
+        .unwrap_or(U128InputState {
+            text: value.to_string(),
+            last_valid: *value,
+        });
+
+    let row_response = ui
+        .vertical(|ui| {
+            ui.set_min_width(full_width);
+            let label_response = ui
+                .horizontal(|ui| {
+                    let label_response =
+                        text_ui.label(ui, ("int_slider_label", label), label, &label_options);
+                    if info_tooltip.is_some() {
+                        ui.add_space(6.0);
+                        info_hint(text_ui, ui, ("int_slider_info", label), info_tooltip);
+                    }
+                    label_response
+                })
+                .inner;
+
+            let controls_response = ui
+                .vertical(|ui| {
+                    ui.set_min_width(full_width);
+                    let slider_min = min.min(u64::MAX as u128) as u64;
+                    let slider_max = max.min(u64::MAX as u128) as u64;
+                    let mut slider_value = (*value).clamp(min, max).min(u64::MAX as u128) as u64;
+
+                    let slider_outer_height = metrics.control_height + 12.0;
+                    let (slider_outer_rect, _) = ui.allocate_exact_size(
+                        egui::vec2(full_width, slider_outer_height),
+                        Sense::hover(),
+                    );
+
+                    let slider_inner_rect = slider_outer_rect.shrink2(egui::vec2(8.0, 6.0));
+                    let slider_id = id.with("u128_slider_drag");
+                    let mut slider_response =
+                        ui.interact(slider_inner_rect, slider_id, Sense::click_and_drag());
+                    let mut slider_changed = false;
+
+                    if (slider_response.dragged() || slider_response.clicked())
+                        && let Some(pointer_pos) = ui.ctx().input(|i| i.pointer.interact_pos())
+                    {
+                        let slider_width = slider_inner_rect.width().max(1.0);
+                        let t = ((pointer_pos.x - slider_inner_rect.left()) / slider_width)
+                            .clamp(0.0, 1.0);
+                        let range = slider_max.saturating_sub(slider_min);
+                        let raw = slider_min as f64 + (range as f64 * t as f64);
+                        let mut next = raw.round() as u64;
+
+                        let step_u64 = step.min(u64::MAX as u128) as u64;
+                        if step_u64 > 1 {
+                            let from_min = next.saturating_sub(slider_min);
+                            let quantized =
+                                ((from_min + (step_u64 / 2)) / step_u64).saturating_mul(step_u64);
+                            next = slider_min.saturating_add(quantized).min(slider_max);
+                        }
+
+                        if next != slider_value {
+                            slider_value = next;
+                            slider_changed = true;
+                        }
+                    }
+
+                    let progress = if slider_max > slider_min {
+                        (slider_value - slider_min) as f32 / (slider_max - slider_min) as f32
+                    } else {
+                        0.0
+                    }
+                    .clamp(0.0, 1.0);
+
+                    let rail_height = (slider_inner_rect.height() * 0.22).clamp(3.0, 8.0);
+                    let rail_rect = egui::Rect::from_center_size(
+                        slider_inner_rect.center(),
+                        egui::vec2(slider_inner_rect.width(), rail_height),
+                    );
+                    let active_width = rail_rect.width() * progress;
+                    let active_rect = egui::Rect::from_min_size(
+                        rail_rect.min,
+                        egui::vec2(active_width, rail_rect.height()),
+                    );
+                    let knob_x = rail_rect.left() + active_width;
+                    let knob_center = egui::pos2(knob_x, rail_rect.center().y);
+                    let knob_radius = (slider_inner_rect.height() * 0.34).clamp(6.0, 11.0);
+
+                    ui.painter().rect(
+                        rail_rect,
+                        egui::CornerRadius::same((rail_height * 0.5).round() as u8),
+                        ui.visuals().widgets.inactive.bg_fill,
+                        ui.visuals().widgets.inactive.bg_stroke,
+                        egui::StrokeKind::Inside,
+                    );
+                    ui.painter().rect(
+                        active_rect,
+                        egui::CornerRadius::same((rail_height * 0.5).round() as u8),
+                        ui.visuals().selection.bg_fill,
+                        egui::Stroke::NONE,
+                        egui::StrokeKind::Inside,
+                    );
+                    ui.painter().circle(
+                        knob_center,
+                        knob_radius,
+                        ui.visuals().widgets.noninteractive.fg_stroke.color,
+                        egui::Stroke::new(1.0, ui.visuals().widgets.inactive.bg_stroke.color),
+                    );
+
+                    if slider_changed {
+                        *value = slider_value as u128;
+                        state.last_valid = *value;
+                        state.text = value.to_string();
+                        slider_response.mark_changed();
+                    }
+
+                    let mut input_options = number_input_options(ui, metrics);
+                    let input_width = (metrics.number_input_width + 32.0).clamp(120.0, 220.0);
+                    input_options.desired_width = Some(input_width);
+                    input_options.min_width = input_width;
+
+                    let text_response = ui
+                        .horizontal(|ui| {
+                            text_ui.singleline_input(ui, input_id, &mut state.text, &input_options)
+                        })
+                        .inner;
+
+                    sanitize_u128_text(&mut state.text);
+
+                    if let Some(parsed) = parse_u128_text(&state.text) {
+                        if parsed >= min && parsed <= max {
+                            *value = parsed;
+                            state.last_valid = parsed;
+                        }
+                    }
+
+                    if text_response.lost_focus() {
+                        if let Some(parsed) = parse_u128_text(&state.text) {
+                            if parsed >= min && parsed <= max {
+                                *value = parsed;
+                                state.last_valid = parsed;
+                                state.text = parsed.to_string();
+                            } else {
+                                state.text = state.last_valid.to_string();
+                            }
+                        } else {
+                            state.text = state.last_valid.to_string();
+                        }
+                    }
+
+                    if !text_response.has_focus() {
+                        state.last_valid = *value;
+                        state.text = value.to_string();
+                    }
+
+                    slider_response.union(text_response)
+                })
+                .inner;
+
+            label_response.union(controls_response)
+        })
+        .inner;
+
+    ui.ctx().data_mut(|d| d.insert_temp(id, state));
+    row_response
+}
+
 pub fn info_hint(
     text_ui: &mut TextUi,
     ui: &mut Ui,
@@ -481,8 +710,13 @@ fn dropdown(
 
     let popup_response = egui::Popup::menu(&response)
         .id(open_id)
+        .align(egui::RectAlign::BOTTOM_START)
+        .align_alternatives(&[])
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
+            let mut clip_rect = ui.clip_rect();
+            clip_rect.min.y = clip_rect.min.y.max(ui.ctx().available_rect().top());
+            ui.set_clip_rect(clip_rect);
             ui.set_min_width(metrics.dropdown_width);
 
             let mut popup_changed = false;
@@ -560,12 +794,13 @@ fn dropdown(
     ui.put(icon_rect, icon);
 
     label_style.color = text_color;
+    let parent_clip_rect = ui.clip_rect();
     let text_rect = egui::Rect::from_min_max(
         egui::pos2(button_rect.left() + 8.0, button_rect.top()),
         egui::pos2(icon_rect.left() - 6.0, button_rect.bottom()),
     );
     ui.scope_builder(egui::UiBuilder::new().max_rect(text_rect), |ui| {
-        ui.set_clip_rect(text_rect);
+        ui.set_clip_rect(text_rect.intersect(parent_clip_rect));
         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
             let _ = text_ui.label(ui, "dropdown_selected_text", &selected_text, &label_style);
         });
@@ -634,6 +869,13 @@ fn sanitize_int_text(text: &mut String, allow_negative: bool) {
     *text = out;
 }
 
+fn sanitize_u128_text(text: &mut String) {
+    if text.is_empty() {
+        return;
+    }
+    text.retain(|ch| ch.is_ascii_digit());
+}
+
 fn parse_float_text(text: &str) -> Option<f32> {
     if text.is_empty() || text == "-" || text == "." || text == "-." {
         None
@@ -647,6 +889,14 @@ fn parse_int_text(text: &str) -> Option<i32> {
         None
     } else {
         text.parse::<i32>().ok()
+    }
+}
+
+fn parse_u128_text(text: &str) -> Option<u128> {
+    if text.is_empty() {
+        None
+    } else {
+        text.parse::<u128>().ok()
     }
 }
 

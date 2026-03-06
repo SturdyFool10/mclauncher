@@ -7,6 +7,9 @@ pub const UI_FONT_SIZE_STEP: f32 = 0.5;
 pub const UI_FONT_WEIGHT_MIN: i32 = 100;
 pub const UI_FONT_WEIGHT_MAX: i32 = 900;
 pub const UI_FONT_WEIGHT_STEP: i32 = 100;
+pub const INSTANCE_DEFAULT_MAX_MEMORY_MIB_MIN: u128 = 512;
+pub const INSTANCE_DEFAULT_MAX_MEMORY_MIB_MAX: u128 = 1_048_576;
+pub const INSTANCE_DEFAULT_MAX_MEMORY_MIB_STEP: u128 = 256;
 
 const MAPLE_FONT_FAMILIES: &[&str] = &["Maple Mono NF", "Maple Mono", "Maple Mono Normal"];
 const JETBRAINS_FONT_FAMILIES: &[&str] = &[
@@ -134,6 +137,52 @@ impl UiFontFamily {
 
     pub fn system_options() -> &'static [UiFontFamily] {
         UI_FONT_SYSTEM_OPTIONS
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum JavaRuntimeVersion {
+    Java8,
+    Java16,
+    Java17,
+    Java21,
+}
+
+impl JavaRuntimeVersion {
+    pub const ALL: [JavaRuntimeVersion; 4] = [
+        JavaRuntimeVersion::Java8,
+        JavaRuntimeVersion::Java16,
+        JavaRuntimeVersion::Java17,
+        JavaRuntimeVersion::Java21,
+    ];
+
+    pub const fn major(self) -> u8 {
+        match self {
+            JavaRuntimeVersion::Java8 => 8,
+            JavaRuntimeVersion::Java16 => 16,
+            JavaRuntimeVersion::Java17 => 17,
+            JavaRuntimeVersion::Java21 => 21,
+        }
+    }
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            JavaRuntimeVersion::Java8 => "Java 8 JVM Path",
+            JavaRuntimeVersion::Java16 => "Java 16 JVM Path",
+            JavaRuntimeVersion::Java17 => "Java 17 JVM Path",
+            JavaRuntimeVersion::Java21 => "Java 21 JVM Path",
+        }
+    }
+
+    pub const fn info_tooltip(self) -> &'static str {
+        match self {
+            JavaRuntimeVersion::Java8 => "Used for Minecraft 1.16.5 and older release versions.",
+            JavaRuntimeVersion::Java16 => "Used for Minecraft 1.17.x release versions.",
+            JavaRuntimeVersion::Java17 => {
+                "Used for Minecraft 1.18 through 1.20.4 release versions."
+            }
+            JavaRuntimeVersion::Java21 => "Used for Minecraft 1.20.5 and newer release versions.",
+        }
     }
 }
 
@@ -304,6 +353,12 @@ pub struct Config {
     ui_font_family: UiFontFamily,
     ui_font_size: f32,
     ui_font_weight: i32,
+    default_instance_max_memory_mib: u128,
+    default_instance_cli_args: String,
+    java_8_jvm_path: Option<String>,
+    java_16_jvm_path: Option<String>,
+    java_17_jvm_path: Option<String>,
+    java_21_jvm_path: Option<String>,
 }
 
 impl Config {
@@ -343,11 +398,52 @@ impl Config {
         self.ui_font_weight
     }
 
+    pub fn default_instance_max_memory_mib(&self) -> u128 {
+        self.default_instance_max_memory_mib
+    }
+
+    pub fn set_default_instance_max_memory_mib(&mut self, memory_mib: u128) {
+        self.default_instance_max_memory_mib = memory_mib.clamp(
+            INSTANCE_DEFAULT_MAX_MEMORY_MIB_MIN,
+            INSTANCE_DEFAULT_MAX_MEMORY_MIB_MAX,
+        );
+    }
+
+    pub fn default_instance_cli_args_mut(&mut self) -> &mut String {
+        &mut self.default_instance_cli_args
+    }
+
+    pub fn java_runtime_path(&self, runtime: JavaRuntimeVersion) -> Option<&str> {
+        match runtime {
+            JavaRuntimeVersion::Java8 => self.java_8_jvm_path.as_deref(),
+            JavaRuntimeVersion::Java16 => self.java_16_jvm_path.as_deref(),
+            JavaRuntimeVersion::Java17 => self.java_17_jvm_path.as_deref(),
+            JavaRuntimeVersion::Java21 => self.java_21_jvm_path.as_deref(),
+        }
+    }
+
+    pub fn set_java_runtime_path(&mut self, runtime: JavaRuntimeVersion, path: Option<String>) {
+        match runtime {
+            JavaRuntimeVersion::Java8 => self.java_8_jvm_path = path,
+            JavaRuntimeVersion::Java16 => self.java_16_jvm_path = path,
+            JavaRuntimeVersion::Java17 => self.java_17_jvm_path = path,
+            JavaRuntimeVersion::Java21 => self.java_21_jvm_path = path,
+        }
+    }
+
     pub fn normalize(&mut self) {
         self.ui_font_size = self.ui_font_size.clamp(UI_FONT_SIZE_MIN, UI_FONT_SIZE_MAX);
         self.ui_font_weight = self
             .ui_font_weight
             .clamp(UI_FONT_WEIGHT_MIN, UI_FONT_WEIGHT_MAX);
+        self.default_instance_max_memory_mib = self.default_instance_max_memory_mib.clamp(
+            INSTANCE_DEFAULT_MAX_MEMORY_MIB_MIN,
+            INSTANCE_DEFAULT_MAX_MEMORY_MIB_MAX,
+        );
+        normalize_optional_path(&mut self.java_8_jvm_path);
+        normalize_optional_path(&mut self.java_16_jvm_path);
+        normalize_optional_path(&mut self.java_17_jvm_path);
+        normalize_optional_path(&mut self.java_21_jvm_path);
         if self.theme_id.trim().is_empty() {
             self.theme_id = "matrix_oled".to_owned();
         }
@@ -364,6 +460,12 @@ impl Config {
             ui_font_family: _,
             ui_font_size: _,
             ui_font_weight: _,
+            default_instance_max_memory_mib: _,
+            default_instance_cli_args: _,
+            java_8_jvm_path: _,
+            java_16_jvm_path: _,
+            java_17_jvm_path: _,
+            java_21_jvm_path: _,
         } = self;
 
         visit(
@@ -394,6 +496,12 @@ impl Config {
             ui_font_family,
             ui_font_size: _,
             ui_font_weight: _,
+            default_instance_max_memory_mib: _,
+            default_instance_cli_args: _,
+            java_8_jvm_path: _,
+            java_16_jvm_path: _,
+            java_17_jvm_path: _,
+            java_21_jvm_path: _,
         } = self;
 
         visit(DropdownSettingId::UiFontFamily.spec(), ui_font_family);
@@ -410,6 +518,12 @@ impl Config {
             ui_font_family: _,
             ui_font_size,
             ui_font_weight: _,
+            default_instance_max_memory_mib: _,
+            default_instance_cli_args: _,
+            java_8_jvm_path: _,
+            java_16_jvm_path: _,
+            java_17_jvm_path: _,
+            java_21_jvm_path: _,
         } = self;
 
         visit(FloatSettingId::UiFontSize.spec(), ui_font_size);
@@ -426,6 +540,12 @@ impl Config {
             ui_font_family: _,
             ui_font_size: _,
             ui_font_weight,
+            default_instance_max_memory_mib: _,
+            default_instance_cli_args: _,
+            java_8_jvm_path: _,
+            java_16_jvm_path: _,
+            java_17_jvm_path: _,
+            java_21_jvm_path: _,
         } = self;
 
         visit(IntSettingId::UiFontWeight.spec(), ui_font_weight);
@@ -442,6 +562,12 @@ impl Config {
             ui_font_family: _,
             ui_font_size: _,
             ui_font_weight: _,
+            default_instance_max_memory_mib: _,
+            default_instance_cli_args: _,
+            java_8_jvm_path: _,
+            java_16_jvm_path: _,
+            java_17_jvm_path: _,
+            java_21_jvm_path: _,
         } = self;
 
         visit(
@@ -449,6 +575,14 @@ impl Config {
             open_type_features_to_enable,
         );
     }
+}
+
+fn normalize_optional_path(path: &mut Option<String>) {
+    *path = path
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
 }
 
 impl Default for Config {
@@ -462,6 +596,12 @@ impl Default for Config {
             ui_font_family: UiFontFamily::MapleMonoNf,
             ui_font_size: 18.0,
             ui_font_weight: 400,
+            default_instance_max_memory_mib: 4096,
+            default_instance_cli_args: String::new(),
+            java_8_jvm_path: None,
+            java_16_jvm_path: None,
+            java_17_jvm_path: None,
+            java_21_jvm_path: None,
         }
     }
 }

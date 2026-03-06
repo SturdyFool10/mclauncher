@@ -648,7 +648,12 @@ impl TextUi {
             Some(320.0_f32.min(ui.ctx().input(|i| i.content_rect().width() * 0.35)));
         let raster = self.rasterize_plain_text(text, &options.text, width_points_opt, scale);
         let size = raster.size_points + options.padding * 2.0;
-        let rect = Rect::from_min_size(pointer + options.offset, size);
+        let mut rect = Rect::from_min_size(pointer + options.offset, size);
+        let min_y = ui.clip_rect().top();
+        if rect.min.y < min_y {
+            let delta = min_y - rect.min.y;
+            rect = rect.translate(egui::vec2(0.0, delta));
+        }
 
         let layer_id = egui::LayerId::new(
             egui::Order::Tooltip,
