@@ -9,7 +9,10 @@ use installation::{
     fetch_version_catalog_with_refresh,
 };
 use launcher_runtime as tokio_runtime;
-use launcher_ui::ui::components::settings_widgets;
+use launcher_ui::{
+    assets,
+    ui::components::{icon_button, settings_widgets},
+};
 use textui::{LabelOptions, TextUi};
 
 const MODLOADER_OPTIONS: [&str; 6] = ["Vanilla", "Fabric", "Forge", "NeoForge", "Quilt", "Custom"];
@@ -183,9 +186,7 @@ pub fn render(
                 "Choose name, thumbnail, modloader, and versions.",
                 &body_style,
             );
-            ui.add_space(6.0);
-            render_thumbnail_picker(ui, text_ui, state);
-            ui.add_space(6.0);
+            render_thumbnail_picker(ui, state);
 
             let _ = settings_widgets::full_width_text_input_row(
                 text_ui,
@@ -194,16 +195,6 @@ pub fn render(
                 "Instance name",
                 Some("Display name shown in the sidebar."),
                 &mut state.name,
-            );
-            ui.add_space(6.0);
-
-            let _ = settings_widgets::full_width_text_input_row(
-                text_ui,
-                ui,
-                "instance_create_thumbnail",
-                "Thumbnail path (optional)",
-                Some("Path to an image file on disk."),
-                &mut state.thumbnail_path,
             );
             ui.add_space(6.0);
 
@@ -696,105 +687,87 @@ fn poll_version_catalog(state: &mut CreateInstanceState) {
     }
 }
 
-fn render_thumbnail_picker(
-    ui: &mut egui::Ui,
-    text_ui: &mut TextUi,
-    state: &mut CreateInstanceState,
-) {
+fn render_thumbnail_picker(ui: &mut egui::Ui, state: &mut CreateInstanceState) {
     const THUMBNAIL_PREVIEW_SIZE: f32 = 150.0;
-    const PREVIEW_FRAME_PADDING: f32 = 8.0;
+    const PREVIEW_FRAME_PADDING: f32 = 0.0;
     let preview_inner_width = ui.available_width().clamp(64.0, THUMBNAIL_PREVIEW_SIZE);
     let preview_height = preview_inner_width;
-    egui::Frame::new()
-        .fill(ui.visuals().widgets.inactive.bg_fill)
-        .stroke(ui.visuals().widgets.inactive.bg_stroke)
-        .corner_radius(egui::CornerRadius::same(10))
-        .inner_margin(egui::Margin::same(PREVIEW_FRAME_PADDING.round() as i8))
-        .show(ui, |ui| {
-            ui.set_width(preview_inner_width);
-            ui.set_min_width(preview_inner_width);
-            ui.set_max_width(preview_inner_width);
-            ui.set_height(preview_height);
-            let trimmed = state.thumbnail_path.trim();
-            if trimmed.is_empty() {
-                ui.with_layout(
+    ui.horizontal(|ui| {
+        let frame_outer_size = preview_inner_width + PREVIEW_FRAME_PADDING * 2.0;
+        let left_inset = ((ui.available_width() - frame_outer_size) * 0.5).max(0.0);
+        ui.add_space(left_inset);
+        let frame_response = egui::Frame::new()
+            .fill(ui.visuals().widgets.inactive.bg_fill)
+            .stroke(ui.visuals().widgets.inactive.bg_stroke)
+            .corner_radius(egui::CornerRadius::same(10))
+            .inner_margin(egui::Margin::same(PREVIEW_FRAME_PADDING.round() as i8))
+            .show(ui, |ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(preview_inner_width, preview_height),
                     egui::Layout::centered_and_justified(egui::Direction::TopDown),
                     |ui| {
-                        ui.label(
-                            egui::RichText::new("No thumbnail selected")
-                                .color(ui.visuals().weak_text_color()),
-                        );
+                        let trimmed = state.thumbnail_path.trim();
+                        if trimmed.is_empty() {
+                            ui.label(
+                                egui::RichText::new("No thumbnail selected")
+                                    .color(ui.visuals().weak_text_color()),
+                            );
+                            return;
+                        }
+
+                        let path = Path::new(trimmed);
+                        if !path.is_file() {
+                            ui.label(
+                                egui::RichText::new("Thumbnail file was not found")
+                                    .color(ui.visuals().weak_text_color()),
+                            );
+                            return;
+                        }
+
+                        let image_uri = file_uri_from_path(path);
+                        let image = egui::Image::from_uri(image_uri)
+                            .maintain_aspect_ratio(true)
+                            .max_size(egui::vec2(preview_inner_width, preview_height));
+                        let _ = ui.add(image);
                     },
                 );
-                return;
-            }
+            })
+            .response
+            .interact(egui::Sense::click());
 
-            let path = Path::new(trimmed);
-            if !path.is_file() {
-                ui.with_layout(
-                    egui::Layout::centered_and_justified(egui::Direction::TopDown),
-                    |ui| {
-                        ui.label(
-                            egui::RichText::new("Thumbnail file was not found")
-                                .color(ui.visuals().weak_text_color()),
-                        );
-                    },
-                );
-                return;
-            }
-
-            let image_uri = file_uri_from_path(path);
-            let image = egui::Image::from_uri(image_uri)
-                .maintain_aspect_ratio(true)
-                .max_size(egui::vec2(preview_inner_width, preview_height));
-            ui.with_layout(
-                egui::Layout::centered_and_justified(egui::Direction::TopDown),
-                |ui| {
-                    let _ = ui.add(image);
-                },
-            );
+        let pointer_in_preview = ui.input(|i| {
+            i.pointer
+                .hover_pos()
+                .is_some_and(|pos| frame_response.rect.contains(pos))
         });
+        let mut should_open_picker = frame_response.clicked();
+        if pointer_in_preview {
+            let overlay_size = egui::vec2(52.0, 52.0);
+            let overlay_rect =
+                egui::Rect::from_center_size(frame_response.rect.center(), overlay_size);
+            let overlay_response = ui
+                .scope_builder(egui::UiBuilder::new().max_rect(overlay_rect), |ui| {
+                    icon_button::svg(
+                        ui,
+                        "instance_create_thumbnail_edit_overlay",
+                        assets::EDIT_SVG,
+                        "Edit thumbnail",
+                        false,
+                        overlay_size.x,
+                    )
+                })
+                .inner;
+            if overlay_response.clicked() {
+                should_open_picker = true;
+            }
+        }
 
-    ui.add_space(6.0);
-    let button_count = if state.thumbnail_path.trim().is_empty() {
-        1.0
-    } else {
-        2.0
-    };
-    let available = ui.available_width().max(1.0);
-    let button_spacing = 6.0 * (button_count - 1.0);
-    let button_width = ((available - button_spacing) / button_count).clamp(1.0, 180.0);
-
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
-        if settings_widgets::full_width_button(
-            text_ui,
-            ui,
-            "instance_create_thumbnail_browse",
-            "Choose thumbnail...",
-            button_width,
-            false,
-        )
-        .clicked()
+        if should_open_picker
             && let Ok(picked) =
                 std::panic::catch_unwind(|| pick_thumbnail_path(state.thumbnail_path.trim()))
             && let Some(path) = picked
         {
             state.thumbnail_path = path;
-        }
-
-        if !state.thumbnail_path.trim().is_empty()
-            && settings_widgets::full_width_button(
-                text_ui,
-                ui,
-                "instance_create_thumbnail_clear",
-                "Clear thumbnail",
-                button_width,
-                false,
-            )
-            .clicked()
-        {
-            state.thumbnail_path.clear();
         }
     });
 }
