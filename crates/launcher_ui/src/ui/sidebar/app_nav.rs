@@ -13,22 +13,27 @@ pub fn render(
     output: &mut SidebarOutput,
     max_icon_width: f32,
 ) {
+    let row_height = max_icon_width.max(1.0);
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing.y = style::SPACE_SM;
         for screen in AppScreen::FIXED_NAV {
             let selected = active_screen == screen;
             let (icon_id, icon_bytes) = icon_for_screen(screen);
             let response = ui
-                .horizontal_centered(|ui| {
-                    icon_button::svg(
-                        ui,
-                        icon_id,
-                        icon_bytes,
-                        screen.label(),
-                        selected,
-                        max_icon_width,
-                    )
-                })
+                .allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), row_height),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        icon_button::svg(
+                            ui,
+                            icon_id,
+                            icon_bytes,
+                            screen.label(),
+                            selected,
+                            max_icon_width,
+                        )
+                    },
+                )
                 .inner;
             if response.clicked() {
                 output.selected_screen = Some(screen);

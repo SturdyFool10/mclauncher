@@ -157,6 +157,11 @@ impl VertexApp {
                 name: instance.name.clone(),
             })
             .collect();
+        tracing::info!(
+            target: "vertexlauncher/app/sidebar",
+            count = self.instance_shortcuts.len(),
+            "Refreshed sidebar instance shortcuts."
+        );
     }
 }
 
