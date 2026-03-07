@@ -1,5 +1,0 @@
-[2026-03-06][23:28:19][INFO][mclauncher/app/mod.rs]: Launcher started. Log file: logs/vertex_1772839699.log
-[2026-03-06][23:28:19][INFO][log]: Both the glow and wgpu renderers are available. Using wgpu.
-[2026-03-06][23:28:19][WARN][log]: Ignoring unknown button type: icon
-[2026-03-06][23:28:19][WARN][log]: Unable to find extension: VK_EXT_physical_device_drm
-[2026-03-06][23:28:19][INFO][log]: There were 2 available wgpu adapters: {backend: Vulkan, device_type: DiscreteGpu, name: "AMD Radeon RX 9070 (RADV GFX1201)", driver: "radv", driver_info: "Mesa 26.0.1-arch2.3", vendor: AMD (0x1002), device: 0x7550}, {backend: Vulkan, device_type: IntegratedGpu, name: "AMD Ryzen 7 9700X 8-Core Processor (RADV RAPHAEL_MENDOCINO)", driver: "radv", driver_info: "Mesa 26.0.1-arch2.3", vendor: AMD (0x1002), device: 0x13C0}

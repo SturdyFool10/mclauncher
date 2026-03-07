@@ -6,3 +6,5 @@ config.json
 config.toml
 cache
 logs/
+instances.json
+instances/

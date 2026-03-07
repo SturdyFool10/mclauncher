@@ -1,18 +1,23 @@
-use config::{Config, INSTANCE_DEFAULT_MAX_MEMORY_MIB_MIN, INSTANCE_DEFAULT_MAX_MEMORY_MIB_STEP};
+use config::{
+    Config, INSTANCE_DEFAULT_MAX_MEMORY_MIB_MIN, INSTANCE_DEFAULT_MAX_MEMORY_MIB_STEP,
+    JavaRuntimeVersion,
+};
 use egui::Ui;
 use installation::{
-    GameSetupResult, LoaderSupportIndex, MinecraftVersionEntry, VersionCatalog, ensure_game_files,
-    fetch_version_catalog_with_refresh,
+    DownloadPolicy, GameSetupResult, InstallProgress, InstallProgressCallback, InstallStage,
+    LoaderSupportIndex, MinecraftVersionEntry, VersionCatalog, ensure_game_files,
+    ensure_openjdk_runtime, fetch_version_catalog_with_refresh,
 };
 use instances::{InstanceStore, set_instance_settings, set_instance_versions};
 use modprovider::{UnifiedContentEntry, UnifiedSearchResult, search_minecraft_content};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use textui::{ButtonOptions, LabelOptions, TextUi, TooltipOptions};
 
 use crate::app::tokio_runtime;
 use crate::ui::components::settings_widgets;
+use crate::{install_activity, notification};
 
 const RESERVED_SYSTEM_MEMORY_MIB: u128 = 4 * 1024;
 const FALLBACK_TOTAL_MEMORY_MIB: u128 = 20 * 1024;
@@ -53,9 +58,19 @@ struct InstanceScreenState {
         Option<Arc<Mutex<mpsc::Receiver<(bool, Result<VersionCatalog, String>)>>>>,
     runtime_prepare_in_flight: bool,
     runtime_prepare_results_tx:
-        Option<mpsc::Sender<(String, String, Result<GameSetupResult, String>)>>,
+        Option<mpsc::Sender<(String, String, Result<RuntimePrepareOutcome, String>)>>,
     runtime_prepare_results_rx:
-        Option<Arc<Mutex<mpsc::Receiver<(String, String, Result<GameSetupResult, String>)>>>>,
+        Option<Arc<Mutex<mpsc::Receiver<(String, String, Result<RuntimePrepareOutcome, String>)>>>>,
+    runtime_progress_tx: Option<mpsc::Sender<InstallProgress>>,
+    runtime_progress_rx: Option<Arc<Mutex<mpsc::Receiver<InstallProgress>>>>,
+    runtime_latest_progress: Option<InstallProgress>,
+    runtime_last_notification_at: Option<Instant>,
+}
+
+#[derive(Clone, Debug)]
+struct RuntimePrepareOutcome {
+    setup: GameSetupResult,
+    configured_java: Option<(JavaRuntimeVersion, String)>,
 }
 
 impl InstanceScreenState {
@@ -98,6 +113,10 @@ impl InstanceScreenState {
             runtime_prepare_in_flight: false,
             runtime_prepare_results_tx: None,
             runtime_prepare_results_rx: None,
+            runtime_progress_tx: None,
+            runtime_progress_rx: None,
+            runtime_latest_progress: None,
+            runtime_last_notification_at: None,
         }
     }
 }
@@ -107,7 +126,7 @@ pub fn render(
     text_ui: &mut TextUi,
     selected_instance_id: Option<&str>,
     instances: &mut InstanceStore,
-    config: &Config,
+    config: &mut Config,
 ) -> bool {
     let mut instances_changed = false;
     let text_color = ui.visuals().text_color();
@@ -167,7 +186,7 @@ pub fn render(
         .data_mut(|d| d.get_temp::<InstanceScreenState>(state_id))
         .unwrap_or_else(|| InstanceScreenState::from_instance(&instance_snapshot, config));
 
-    poll_background_tasks(&mut state);
+    poll_background_tasks(&mut state, config);
     sync_version_catalog(&mut state, config.include_snapshots_and_betas(), false);
     if state.version_catalog_in_flight
         || state.discover_in_flight
@@ -204,6 +223,7 @@ pub fn render(
         instance_id,
         instance_root_path.as_path(),
         selected_game_version_for_runtime.as_str(),
+        config,
     );
     ui.add_space(12.0);
     ui.separator();
@@ -394,9 +414,10 @@ pub fn render(
                 state.status_message = Some("Minecraft game version cannot be empty.".to_owned());
             } else if modloader.trim().is_empty() {
                 state.status_message = Some("Modloader cannot be empty.".to_owned());
-            } else if !state
-                .loader_support
-                .supports_loader(modloader.as_str(), game_version.as_str())
+            } else if support_catalog_ready(&state)
+                && !state
+                    .loader_support
+                    .supports_loader(modloader.as_str(), game_version.as_str())
                 && state.selected_modloader != CUSTOM_MODLOADER_INDEX
             {
                 state.status_message = Some(format!(
@@ -679,6 +700,61 @@ pub fn render(
         );
     }
 
+    if let Some(progress) = state.runtime_latest_progress.as_ref() {
+        ui.add_space(8.0);
+        let fraction = progress_fraction(progress);
+        let progress_label = if let Some(eta) = progress.eta_seconds {
+            format!(
+                "{} · {:.1} MiB/s · ETA {}s",
+                stage_label(progress.stage),
+                progress.bytes_per_second / (1024.0 * 1024.0),
+                eta
+            )
+        } else {
+            format!(
+                "{} · {:.1} MiB/s",
+                stage_label(progress.stage),
+                progress.bytes_per_second / (1024.0 * 1024.0)
+            )
+        };
+        ui.add(
+            egui::ProgressBar::new(fraction)
+                .show_percentage()
+                .text(progress_label),
+        );
+
+        let bytes_line = if let Some(total) = progress.total_bytes {
+            format!(
+                "{} / {}",
+                format_bytes(progress.downloaded_bytes),
+                format_bytes(total)
+            )
+        } else {
+            format!("{} downloaded", format_bytes(progress.downloaded_bytes))
+        };
+        let _ = text_ui.label(
+            ui,
+            ("instance_runtime_bytes", instance_id),
+            &format!(
+                "Files: {}/{} · {}",
+                progress.downloaded_files, progress.total_files, bytes_line
+            ),
+            &LabelOptions {
+                color: ui.visuals().weak_text_color(),
+                wrap: true,
+                ..LabelOptions::default()
+            },
+        );
+    } else if state.runtime_prepare_in_flight {
+        ui.add_space(8.0);
+        ui.add(
+            egui::ProgressBar::new(0.0)
+                .animate(true)
+                .show_percentage()
+                .text("Starting installation..."),
+        );
+    }
+
     ui.ctx().data_mut(|d| d.insert_temp(state_id, state));
     instances_changed
 }
@@ -690,6 +766,7 @@ fn render_runtime_row(
     id: &str,
     instance_root: &Path,
     game_version: &str,
+    config: &Config,
 ) {
     let button_style = ButtonOptions {
         min_size: egui::vec2(120.0, 34.0),
@@ -706,37 +783,45 @@ fn render_runtime_row(
     muted_style.wrap = false;
 
     ui.horizontal(|ui| {
-        let action_label = if state.running { "Stop" } else { "Launch" };
-        if text_ui
-            .button(
-                ui,
-                ("instance_runtime_toggle", id),
-                action_label,
-                &button_style,
-            )
-            .clicked()
-        {
-            if state.running {
-                state.running = false;
-                state.status_message = Some("Stop requested for this instance.".to_owned());
-            } else if game_version.trim().is_empty() {
-                state.status_message =
-                    Some("Cannot launch: choose a Minecraft game version first.".to_owned());
-            } else if state.runtime_prepare_in_flight {
-                state.status_message = Some("Already preparing game files...".to_owned());
-            } else {
-                request_runtime_prepare(
-                    state,
-                    instance_root.to_path_buf(),
-                    game_version.trim().to_owned(),
-                );
+        if !state.runtime_prepare_in_flight {
+            let action_label = if state.running { "Stop" } else { "Launch" };
+            if text_ui
+                .button(
+                    ui,
+                    ("instance_runtime_toggle", id),
+                    action_label,
+                    &button_style,
+                )
+                .clicked()
+            {
+                if state.running {
+                    state.running = false;
+                    state.status_message = Some("Stop requested for this instance.".to_owned());
+                } else if game_version.trim().is_empty() {
+                    state.status_message =
+                        Some("Cannot launch: choose a Minecraft game version first.".to_owned());
+                } else {
+                    request_runtime_prepare(
+                        state,
+                        instance_root.to_path_buf(),
+                        game_version.trim().to_owned(),
+                        selected_modloader_value(state),
+                        normalize_optional(state.modloader_version_input.as_str()),
+                        recommended_java_runtime(game_version),
+                        choose_java_executable(config, game_version),
+                        config.download_starts_per_second(),
+                        config.parsed_download_speed_limit_bps(),
+                    );
+                }
             }
+            ui.add_space(10.0);
         }
-        ui.add_space(10.0);
         let _ = text_ui.label(
             ui,
             ("instance_runtime_state", id),
-            if state.running {
+            if state.runtime_prepare_in_flight {
+                "Runtime state: Installing"
+            } else if state.running {
                 "Runtime state: Running"
             } else {
                 "Runtime state: Stopped"
@@ -844,10 +929,11 @@ fn normalize_optional(value: &str) -> Option<String> {
     }
 }
 
-fn poll_background_tasks(state: &mut InstanceScreenState) {
+fn poll_background_tasks(state: &mut InstanceScreenState, config: &mut Config) {
     poll_version_catalog(state);
     poll_discovery_search(state);
-    poll_runtime_prepare(state);
+    poll_runtime_progress(state);
+    poll_runtime_prepare(state, config);
 }
 
 fn sync_version_catalog(
@@ -1063,15 +1149,30 @@ fn ensure_runtime_prepare_channel(state: &mut InstanceScreenState) {
     if state.runtime_prepare_results_tx.is_some() && state.runtime_prepare_results_rx.is_some() {
         return;
     }
-    let (tx, rx) = mpsc::channel::<(String, String, Result<GameSetupResult, String>)>();
+    let (tx, rx) = mpsc::channel::<(String, String, Result<RuntimePrepareOutcome, String>)>();
     state.runtime_prepare_results_tx = Some(tx);
     state.runtime_prepare_results_rx = Some(Arc::new(Mutex::new(rx)));
+}
+
+fn ensure_runtime_progress_channel(state: &mut InstanceScreenState) {
+    if state.runtime_progress_tx.is_some() && state.runtime_progress_rx.is_some() {
+        return;
+    }
+    let (tx, rx) = mpsc::channel::<InstallProgress>();
+    state.runtime_progress_tx = Some(tx);
+    state.runtime_progress_rx = Some(Arc::new(Mutex::new(rx)));
 }
 
 fn request_runtime_prepare(
     state: &mut InstanceScreenState,
     instance_root: PathBuf,
     game_version: String,
+    modloader: String,
+    modloader_version: Option<String>,
+    required_java_runtime: Option<JavaRuntimeVersion>,
+    java_executable: Option<String>,
+    download_starts_per_second: u32,
+    download_speed_limit_bps: Option<u64>,
 ) {
     let game_version = game_version.trim().to_owned();
     if game_version.is_empty() || state.runtime_prepare_in_flight {
@@ -1079,28 +1180,136 @@ fn request_runtime_prepare(
     }
 
     ensure_runtime_prepare_channel(state);
+    ensure_runtime_progress_channel(state);
     let Some(tx) = state.runtime_prepare_results_tx.as_ref().cloned() else {
+        return;
+    };
+    let Some(progress_tx) = state.runtime_progress_tx.as_ref().cloned() else {
         return;
     };
 
     state.runtime_prepare_in_flight = true;
+    state.runtime_latest_progress = None;
     state.status_message = Some(format!("Preparing Minecraft {game_version}..."));
     let instance_root_display = instance_root.display().to_string();
     let game_version_for_task = game_version.clone();
     let game_version_for_result = game_version.clone();
+    let modloader_for_task = modloader.trim().to_owned();
+    let modloader_version_for_task = modloader_version
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let java_executable_for_task = java_executable;
+    let download_policy = DownloadPolicy {
+        starts_per_second: download_starts_per_second.max(1),
+        max_download_bps: download_speed_limit_bps,
+    };
+    let instance_id_for_notifications = state.name_input.clone();
     let _ = tokio_runtime::spawn(async move {
+        let progress_tx_done = progress_tx.clone();
+        let progress_callback: InstallProgressCallback = Arc::new(move |event| {
+            let _ = progress_tx.send(event);
+        });
         let result = tokio_runtime::spawn_blocking(move || {
-            ensure_game_files(instance_root.as_path(), game_version_for_task.as_str())
-                .map_err(|err| err.to_string())
+            let mut configured_java = None;
+            let java_path = if let Some(path) = java_executable_for_task
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+            {
+                path
+            } else if let Some(runtime) = required_java_runtime {
+                let installed = ensure_openjdk_runtime(runtime.major()).map_err(|err| {
+                    format!("failed to auto-install OpenJDK {}: {err}", runtime.major())
+                })?;
+                let installed = installed.display().to_string();
+                configured_java = Some((runtime, installed.clone()));
+                installed
+            } else {
+                "java".to_owned()
+            };
+            ensure_game_files(
+                instance_root.as_path(),
+                game_version_for_task.as_str(),
+                modloader_for_task.as_str(),
+                modloader_version_for_task.as_deref(),
+                Some(java_path.as_str()),
+                &download_policy,
+                Some(progress_callback),
+            )
+            .map(|setup| RuntimePrepareOutcome {
+                setup,
+                configured_java,
+            })
+            .map_err(|err| err.to_string())
         })
         .await
         .map_err(|err| format!("runtime prepare task join error: {err}"))
         .and_then(|inner| inner);
         let _ = tx.send((game_version_for_result, instance_root_display, result));
+        let _ = progress_tx_done.send(InstallProgress {
+            stage: InstallStage::Complete,
+            message: format!("Install task ended for {instance_id_for_notifications}."),
+            downloaded_files: 0,
+            total_files: 0,
+            downloaded_bytes: 0,
+            total_bytes: None,
+            bytes_per_second: 0.0,
+            eta_seconds: Some(0),
+        });
     });
 }
 
-fn poll_runtime_prepare(state: &mut InstanceScreenState) {
+fn poll_runtime_progress(state: &mut InstanceScreenState) {
+    let mut updates = Vec::new();
+    let mut should_reset_channel = false;
+    if let Some(rx) = state.runtime_progress_rx.as_ref() {
+        match rx.lock() {
+            Ok(receiver) => loop {
+                match receiver.try_recv() {
+                    Ok(update) => updates.push(update),
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        should_reset_channel = true;
+                        break;
+                    }
+                }
+            },
+            Err(_) => should_reset_channel = true,
+        }
+    }
+
+    if should_reset_channel {
+        state.runtime_progress_tx = None;
+        state.runtime_progress_rx = None;
+    }
+
+    for progress in updates {
+        state.runtime_latest_progress = Some(progress.clone());
+        install_activity::set_progress(state.name_input.as_str(), &progress);
+        if should_emit_progress_notification(state, &progress) {
+            let source = format!("installation/{}", state.name_input);
+            let fraction = progress_fraction(&progress);
+            notification::progress!(
+                notification::Severity::Info,
+                source,
+                fraction,
+                "{} · {:.1} MiB/s{}",
+                stage_label(progress.stage),
+                progress.bytes_per_second / (1024.0 * 1024.0),
+                progress
+                    .eta_seconds
+                    .map(|eta| format!(" · ETA {}s", eta))
+                    .unwrap_or_default()
+            );
+            state.runtime_last_notification_at = Some(Instant::now());
+        }
+    }
+}
+
+fn poll_runtime_prepare(state: &mut InstanceScreenState, config: &mut Config) {
     let mut updates = Vec::new();
     let mut should_reset_channel = false;
     if let Some(rx) = state.runtime_prepare_results_rx.as_ref() {
@@ -1123,23 +1332,100 @@ fn poll_runtime_prepare(state: &mut InstanceScreenState) {
         state.runtime_prepare_results_tx = None;
         state.runtime_prepare_results_rx = None;
         state.runtime_prepare_in_flight = false;
+        state.runtime_progress_tx = None;
+        state.runtime_progress_rx = None;
     }
 
     for (game_version, instance_root_display, result) in updates {
         state.runtime_prepare_in_flight = false;
         match result {
-            Ok(setup) => {
-                state.running = true;
+            Ok(outcome) => {
+                if let Some((runtime, path)) = outcome.configured_java {
+                    config.set_java_runtime_path(runtime, Some(path));
+                }
+                let setup = outcome.setup;
+                state.running = false;
+                install_activity::clear_instance(state.name_input.as_str());
                 state.status_message = Some(format!(
-                    "Prepared Minecraft {} in {} ({} file(s) downloaded).",
-                    game_version, instance_root_display, setup.downloaded_files
+                    "Installed Minecraft {} in {} ({} file(s) downloaded, loader: {}). Launch execution is not wired yet.",
+                    game_version,
+                    instance_root_display,
+                    setup.downloaded_files,
+                    setup.resolved_modloader_version.as_deref().unwrap_or("n/a")
                 ));
+                notification::progress!(
+                    notification::Severity::Info,
+                    format!("installation/{}", state.name_input),
+                    1.0f32,
+                    "Installed Minecraft {} ({} files).",
+                    game_version,
+                    setup.downloaded_files
+                );
             }
             Err(err) => {
                 state.running = false;
+                install_activity::clear_instance(state.name_input.as_str());
                 state.status_message = Some(format!("Failed to prepare game files: {err}"));
+                notification::error!(
+                    format!("installation/{}", state.name_input),
+                    "{} installation failed: {}",
+                    state.name_input,
+                    err
+                );
             }
         }
+    }
+}
+
+fn should_emit_progress_notification(
+    state: &InstanceScreenState,
+    _progress: &InstallProgress,
+) -> bool {
+    match state.runtime_last_notification_at {
+        Some(last) => last.elapsed() >= Duration::from_millis(250),
+        None => true,
+    }
+}
+
+fn progress_fraction(progress: &InstallProgress) -> f32 {
+    if progress.total_files > 0 {
+        return (progress.downloaded_files as f32 / progress.total_files as f32).clamp(0.0, 1.0);
+    }
+    if let Some(total_bytes) = progress.total_bytes
+        && total_bytes > 0
+    {
+        return (progress.downloaded_bytes as f32 / total_bytes as f32).clamp(0.0, 1.0);
+    }
+    if matches!(progress.stage, InstallStage::Complete) {
+        1.0
+    } else {
+        0.0
+    }
+}
+
+fn stage_label(stage: InstallStage) -> &'static str {
+    match stage {
+        InstallStage::PreparingFolders => "Preparing folders",
+        InstallStage::ResolvingMetadata => "Resolving metadata",
+        InstallStage::DownloadingCore => "Downloading core files",
+        InstallStage::InstallingModloader => "Installing modloader",
+        InstallStage::Complete => "Complete",
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    let value = bytes as f64;
+    if value >= GIB {
+        format!("{:.2} GiB", value / GIB)
+    } else if value >= MIB {
+        format!("{:.2} MiB", value / MIB)
+    } else if value >= KIB {
+        format!("{:.2} KiB", value / KIB)
+    } else {
+        format!("{bytes} B")
     }
 }
 
@@ -1151,7 +1437,45 @@ fn selected_game_version(state: &InstanceScreenState) -> &str {
         .unwrap_or_else(|| state.game_version_input.as_str())
 }
 
+fn choose_java_executable(config: &Config, game_version: &str) -> Option<String> {
+    if let Some(runtime) = recommended_java_runtime(game_version)
+        && let Some(path) = config.java_runtime_path(runtime)
+    {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_owned());
+        }
+    }
+    None
+}
+
+fn recommended_java_runtime(game_version: &str) -> Option<JavaRuntimeVersion> {
+    let mut parts = game_version
+        .split('.')
+        .filter_map(|part| part.parse::<u32>().ok());
+    let major = parts.next()?;
+    let minor = parts.next()?;
+    let patch = parts.next().unwrap_or(0);
+
+    if major != 1 {
+        return Some(JavaRuntimeVersion::Java21);
+    }
+    if minor <= 16 {
+        return Some(JavaRuntimeVersion::Java8);
+    }
+    if minor == 17 {
+        return Some(JavaRuntimeVersion::Java16);
+    }
+    if minor > 20 || (minor == 20 && patch >= 5) {
+        return Some(JavaRuntimeVersion::Java21);
+    }
+    Some(JavaRuntimeVersion::Java17)
+}
+
 fn ensure_selected_modloader_is_supported(state: &mut InstanceScreenState, game_version: &str) {
+    if !support_catalog_ready(state) {
+        return;
+    }
     if state.selected_modloader == CUSTOM_MODLOADER_INDEX {
         return;
     }
@@ -1168,6 +1492,10 @@ fn ensure_selected_modloader_is_supported(state: &mut InstanceScreenState, game_
     }
 
     state.selected_modloader = 0;
+}
+
+fn support_catalog_ready(state: &InstanceScreenState) -> bool {
+    state.version_catalog_include_snapshots.is_some() && state.version_catalog_error.is_none()
 }
 
 fn render_discovery_entry(

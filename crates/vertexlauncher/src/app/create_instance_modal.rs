@@ -949,6 +949,9 @@ fn poll_modloader_versions(state: &mut CreateInstanceState) {
 }
 
 fn ensure_selected_modloader_is_supported(state: &mut CreateInstanceState, game_version: &str) {
+    if !support_catalog_ready(state) {
+        return;
+    }
     if state.selected_modloader == CUSTOM_MODLOADER_INDEX {
         return;
     }
@@ -992,7 +995,8 @@ fn build_draft(state: &CreateInstanceState) -> Result<CreateInstanceDraft, Strin
             .to_owned()
     };
 
-    if state.selected_modloader != CUSTOM_MODLOADER_INDEX
+    if support_catalog_ready(state)
+        && state.selected_modloader != CUSTOM_MODLOADER_INDEX
         && !state
             .loader_support
             .supports_loader(modloader.as_str(), game_version)
@@ -1019,4 +1023,8 @@ fn build_draft(state: &CreateInstanceState) -> Result<CreateInstanceDraft, Strin
         game_version: game_version.to_owned(),
         modloader_version,
     })
+}
+
+fn support_catalog_ready(state: &CreateInstanceState) -> bool {
+    state.version_catalog_include_snapshots.is_some() && state.version_catalog_error.is_none()
 }

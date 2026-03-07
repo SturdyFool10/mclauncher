@@ -6,6 +6,7 @@ pub mod app {
 
 pub mod assets;
 pub mod console;
+pub mod install_activity;
 pub mod notification;
 pub mod screens;
 pub mod ui;

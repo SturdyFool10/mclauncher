@@ -11,6 +11,9 @@ pub const INSTANCE_DEFAULT_MAX_MEMORY_MIB_MIN: u128 = 512;
 pub const INSTANCE_DEFAULT_MAX_MEMORY_MIB_MAX: u128 = 1_048_576;
 pub const INSTANCE_DEFAULT_MAX_MEMORY_MIB_STEP: u128 = 256;
 pub const DEFAULT_MINECRAFT_INSTALLATIONS_ROOT: &str = "instances";
+pub const DOWNLOAD_STARTS_PER_SECOND_MIN: u32 = 1;
+pub const DOWNLOAD_STARTS_PER_SECOND_MAX: u32 = 128;
+pub const DEFAULT_DOWNLOAD_STARTS_PER_SECOND: u32 = 4;
 
 const MAPLE_FONT_FAMILIES: &[&str] = &["Maple Mono NF", "Maple Mono", "Maple Mono Normal"];
 const JETBRAINS_FONT_FAMILIES: &[&str] = &[
@@ -366,6 +369,9 @@ pub struct Config {
     default_instance_max_memory_mib: u128,
     default_instance_cli_args: String,
     minecraft_installations_root: String,
+    download_starts_per_second: u32,
+    download_speed_limit_enabled: bool,
+    download_speed_limit: String,
     java_8_jvm_path: Option<String>,
     java_16_jvm_path: Option<String>,
     java_17_jvm_path: Option<String>,
@@ -444,6 +450,40 @@ impl Config {
         );
     }
 
+    pub fn download_starts_per_second(&self) -> u32 {
+        self.download_starts_per_second
+    }
+
+    pub fn set_download_starts_per_second(&mut self, starts_per_second: u32) {
+        self.download_starts_per_second = starts_per_second.clamp(
+            DOWNLOAD_STARTS_PER_SECOND_MIN,
+            DOWNLOAD_STARTS_PER_SECOND_MAX,
+        );
+    }
+
+    pub fn download_speed_limit_enabled(&self) -> bool {
+        self.download_speed_limit_enabled
+    }
+
+    pub fn set_download_speed_limit_enabled(&mut self, enabled: bool) {
+        self.download_speed_limit_enabled = enabled;
+    }
+
+    pub fn download_speed_limit(&self) -> &str {
+        &self.download_speed_limit
+    }
+
+    pub fn download_speed_limit_mut(&mut self) -> &mut String {
+        &mut self.download_speed_limit
+    }
+
+    pub fn parsed_download_speed_limit_bps(&self) -> Option<u64> {
+        if !self.download_speed_limit_enabled {
+            return None;
+        }
+        parse_bitrate_to_bps(self.download_speed_limit())
+    }
+
     pub fn java_runtime_path(&self, runtime: JavaRuntimeVersion) -> Option<&str> {
         match runtime {
             JavaRuntimeVersion::Java8 => self.java_8_jvm_path.as_deref(),
@@ -471,6 +511,11 @@ impl Config {
             INSTANCE_DEFAULT_MAX_MEMORY_MIB_MIN,
             INSTANCE_DEFAULT_MAX_MEMORY_MIB_MAX,
         );
+        self.download_starts_per_second = self.download_starts_per_second.clamp(
+            DOWNLOAD_STARTS_PER_SECOND_MIN,
+            DOWNLOAD_STARTS_PER_SECOND_MAX,
+        );
+        self.download_speed_limit = self.download_speed_limit.trim().to_owned();
         normalize_required_path(
             &mut self.minecraft_installations_root,
             DEFAULT_MINECRAFT_INSTALLATIONS_ROOT,
@@ -499,6 +544,9 @@ impl Config {
             default_instance_max_memory_mib: _,
             default_instance_cli_args: _,
             minecraft_installations_root: _,
+            download_starts_per_second: _,
+            download_speed_limit_enabled: _,
+            download_speed_limit: _,
             java_8_jvm_path: _,
             java_16_jvm_path: _,
             java_17_jvm_path: _,
@@ -541,6 +589,9 @@ impl Config {
             default_instance_max_memory_mib: _,
             default_instance_cli_args: _,
             minecraft_installations_root: _,
+            download_starts_per_second: _,
+            download_speed_limit_enabled: _,
+            download_speed_limit: _,
             java_8_jvm_path: _,
             java_16_jvm_path: _,
             java_17_jvm_path: _,
@@ -565,6 +616,9 @@ impl Config {
             default_instance_max_memory_mib: _,
             default_instance_cli_args: _,
             minecraft_installations_root: _,
+            download_starts_per_second: _,
+            download_speed_limit_enabled: _,
+            download_speed_limit: _,
             java_8_jvm_path: _,
             java_16_jvm_path: _,
             java_17_jvm_path: _,
@@ -589,6 +643,9 @@ impl Config {
             default_instance_max_memory_mib: _,
             default_instance_cli_args: _,
             minecraft_installations_root: _,
+            download_starts_per_second: _,
+            download_speed_limit_enabled: _,
+            download_speed_limit: _,
             java_8_jvm_path: _,
             java_16_jvm_path: _,
             java_17_jvm_path: _,
@@ -613,6 +670,9 @@ impl Config {
             default_instance_max_memory_mib: _,
             default_instance_cli_args: _,
             minecraft_installations_root: _,
+            download_starts_per_second: _,
+            download_speed_limit_enabled: _,
+            download_speed_limit: _,
             java_8_jvm_path: _,
             java_16_jvm_path: _,
             java_17_jvm_path: _,
@@ -658,12 +718,47 @@ impl Default for Config {
             default_instance_max_memory_mib: 4096,
             default_instance_cli_args: String::new(),
             minecraft_installations_root: DEFAULT_MINECRAFT_INSTALLATIONS_ROOT.to_owned(),
+            download_starts_per_second: DEFAULT_DOWNLOAD_STARTS_PER_SECOND,
+            download_speed_limit_enabled: false,
+            download_speed_limit: String::new(),
             java_8_jvm_path: None,
             java_16_jvm_path: None,
             java_17_jvm_path: None,
             java_21_jvm_path: None,
         }
     }
+}
+
+pub fn parse_bitrate_to_bps(value: &str) -> Option<u64> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let normalized = trimmed.to_ascii_lowercase();
+    let (number_part, unit_multiplier): (&str, u64) =
+        if let Some(prefix) = normalized.strip_suffix("tbps") {
+            (prefix, 1_000_000_000_000)
+        } else if let Some(prefix) = normalized.strip_suffix("gbps") {
+            (prefix, 1_000_000_000)
+        } else if let Some(prefix) = normalized.strip_suffix("mbps") {
+            (prefix, 1_000_000)
+        } else if let Some(prefix) = normalized.strip_suffix("kbps") {
+            (prefix, 1_000)
+        } else {
+            return None;
+        };
+
+    let quantity = number_part.trim().parse::<f64>().ok()?;
+    if !quantity.is_finite() || quantity <= 0.0 {
+        return None;
+    }
+
+    let bps = quantity * unit_multiplier as f64;
+    if !bps.is_finite() || bps <= 0.0 || bps > u64::MAX as f64 {
+        return None;
+    }
+    Some(bps.round() as u64)
 }
 
 #[derive(Clone, Debug)]

@@ -1,6 +1,7 @@
 use config::{
-    Config, DropdownSettingId, INSTANCE_DEFAULT_MAX_MEMORY_MIB_MIN,
-    INSTANCE_DEFAULT_MAX_MEMORY_MIB_STEP, JavaRuntimeVersion, UiFontFamily,
+    Config, DOWNLOAD_STARTS_PER_SECOND_MAX, DOWNLOAD_STARTS_PER_SECOND_MIN, DropdownSettingId,
+    INSTANCE_DEFAULT_MAX_MEMORY_MIB_MIN, INSTANCE_DEFAULT_MAX_MEMORY_MIB_STEP, JavaRuntimeVersion,
+    UiFontFamily, parse_bitrate_to_bps,
 };
 use egui::Ui;
 use installation::purge_cache as purge_installation_cache;
@@ -241,6 +242,79 @@ fn render_instance_defaults_section(ui: &mut Ui, text_ui: &mut TextUi, config: &
             .data_mut(|d| d.insert_temp(cache_status_id, message));
     }
     ui.add_space(style::SPACE_MD);
+
+    let mut starts_per_second = config.download_starts_per_second() as i32;
+    let starts_response = settings_widgets::int_stepper_row(
+        text_ui,
+        ui,
+        "download_starts_per_second",
+        "Download starts per second",
+        Some("Global rate limit for starting download jobs. Default: 4."),
+        &mut starts_per_second,
+        DOWNLOAD_STARTS_PER_SECOND_MIN as i32,
+        DOWNLOAD_STARTS_PER_SECOND_MAX as i32,
+        1,
+    );
+    if starts_response.changed() {
+        config.set_download_starts_per_second(starts_per_second.max(1) as u32);
+    }
+    ui.add_space(style::SPACE_MD);
+
+    let mut speed_limit_enabled = config.download_speed_limit_enabled();
+    let speed_toggle_response = settings_widgets::toggle_row(
+        text_ui,
+        ui,
+        "Enable download speed limiter",
+        Some("When disabled, no bandwidth cap is applied."),
+        &mut speed_limit_enabled,
+    );
+    if speed_toggle_response.changed() {
+        config.set_download_speed_limit_enabled(speed_limit_enabled);
+    }
+    ui.add_space(style::SPACE_MD);
+
+    let mut speed_limit = config.download_speed_limit().to_owned();
+    let speed_response = settings_widgets::full_width_text_input_row(
+        text_ui,
+        ui,
+        "download_speed_limit",
+        "Download speed limit",
+        Some("Format: <number><unit> where unit is Kbps, Mbps, Gbps, or Tbps (example: 250Mbps)."),
+        &mut speed_limit,
+    );
+    if speed_response.changed() {
+        *config.download_speed_limit_mut() = speed_limit;
+    }
+    if config.download_speed_limit_enabled() {
+        let current_value = config.download_speed_limit().trim();
+        let mut validation_style = body_style.clone();
+        validation_style.wrap = true;
+        if current_value.is_empty() {
+            validation_style.color = ui.visuals().weak_text_color();
+            let _ = text_ui.label(
+                ui,
+                "download_speed_limit_hint",
+                "Speed limiter enabled, but no value set. Enter something like 250Mbps.",
+                &validation_style,
+            );
+        } else if let Some(bps) = parse_bitrate_to_bps(current_value) {
+            let _ = text_ui.label(
+                ui,
+                "download_speed_limit_ok",
+                &format!("Speed limiter active at {bps} bps."),
+                &validation_style,
+            );
+        } else {
+            validation_style.color = ui.visuals().error_fg_color;
+            let _ = text_ui.label(
+                ui,
+                "download_speed_limit_invalid",
+                "Invalid speed format. Use Kbps, Mbps, Gbps, or Tbps.",
+                &validation_style,
+            );
+        }
+        ui.add_space(style::SPACE_MD);
+    }
 
     let mut default_memory = config.default_instance_max_memory_mib();
     let max_memory_mib = memory_slider_max_mib();

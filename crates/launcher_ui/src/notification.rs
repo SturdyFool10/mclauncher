@@ -24,6 +24,8 @@ pub struct Notification {
     pub severity: Severity,
     pub source: String,
     pub message: String,
+    pub progress: Option<f32>,
+    pub replace_by_source: bool,
     pub when: Instant,
 }
 
@@ -32,6 +34,7 @@ struct NotificationEntry {
     severity: Severity,
     source: String,
     message: String,
+    progress: Option<f32>,
     count: u32,
     last_seen: Instant,
 }
@@ -99,6 +102,27 @@ pub fn emit(severity: Severity, source: impl Into<String>, message: impl Into<St
         severity,
         source,
         message,
+        progress: None,
+        replace_by_source: false,
+        when: Instant::now(),
+    });
+}
+
+pub fn emit_progress(
+    severity: Severity,
+    source: impl Into<String>,
+    message: impl Into<String>,
+    progress: f32,
+) {
+    let source = source.into();
+    let message = message.into();
+    let progress = progress.clamp(0.0, 1.0);
+    let _ = center().tx.send(Notification {
+        severity,
+        source,
+        message,
+        progress: Some(progress),
+        replace_by_source: true,
         when: Instant::now(),
     });
 }
@@ -113,7 +137,19 @@ fn drain_notifications() {
     };
 
     while let Ok(notif) = rx.try_recv() {
-        if let Some(existing) = store.entries.iter_mut().find(|entry| {
+        if notif.replace_by_source {
+            if let Some(existing) = store
+                .entries
+                .iter_mut()
+                .find(|entry| entry.severity == notif.severity && entry.source == notif.source)
+            {
+                existing.message = notif.message;
+                existing.progress = notif.progress;
+                existing.count = 1;
+                existing.last_seen = notif.when;
+                continue;
+            }
+        } else if let Some(existing) = store.entries.iter_mut().find(|entry| {
             entry.severity == notif.severity
                 && entry.source == notif.source
                 && entry.message == notif.message
@@ -127,6 +163,7 @@ fn drain_notifications() {
             severity: notif.severity,
             source: notif.source,
             message: notif.message,
+            progress: notif.progress,
             count: 1,
             last_seen: notif.when,
         });
@@ -230,6 +267,14 @@ pub fn render_popups(ctx: &egui::Context, text_ui: &mut TextUi) {
                         entry.message.as_str(),
                         &message_style,
                     );
+                    if let Some(progress) = entry.progress {
+                        ui.add_space(6.0);
+                        ui.add(
+                            egui::ProgressBar::new(progress)
+                                .show_percentage()
+                                .desired_width(ui.available_width()),
+                        );
+                    }
                 });
             }
         });
@@ -337,3 +382,17 @@ pub use crate::__notification_error as error;
 pub use crate::__notification_info as info;
 pub use crate::__notification_log as log;
 pub use crate::__notification_warn as warn;
+
+#[macro_export]
+macro_rules! __notification_progress {
+    ($severity:expr, $source:expr, $progress:expr, $fmt:literal $(, $arg:expr )* $(,)?) => {
+        $crate::notification::emit_progress(
+            $severity,
+            $source,
+            format!($fmt $(, $arg )*),
+            $progress,
+        )
+    };
+}
+
+pub use crate::__notification_progress as progress;

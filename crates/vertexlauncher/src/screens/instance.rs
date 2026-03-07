@@ -1,8 +1,11 @@
-use config::{Config, INSTANCE_DEFAULT_MAX_MEMORY_MIB_MIN, INSTANCE_DEFAULT_MAX_MEMORY_MIB_STEP};
+use config::{
+    Config, INSTANCE_DEFAULT_MAX_MEMORY_MIB_MIN, INSTANCE_DEFAULT_MAX_MEMORY_MIB_STEP,
+    JavaRuntimeVersion,
+};
 use egui::Ui;
 use installation::{
-    GameSetupResult, LoaderSupportIndex, MinecraftVersionEntry, VersionCatalog, ensure_game_files,
-    fetch_version_catalog_with_refresh,
+    DownloadPolicy, GameSetupResult, LoaderSupportIndex, MinecraftVersionEntry, VersionCatalog,
+    ensure_game_files, ensure_openjdk_runtime, fetch_version_catalog_with_refresh,
 };
 use instances::{InstanceStore, set_instance_settings, set_instance_versions};
 use modprovider::{UnifiedContentEntry, UnifiedSearchResult, search_minecraft_content};
@@ -53,9 +56,15 @@ struct InstanceScreenState {
         Option<Arc<Mutex<mpsc::Receiver<(bool, Result<VersionCatalog, String>)>>>>,
     runtime_prepare_in_flight: bool,
     runtime_prepare_results_tx:
-        Option<mpsc::Sender<(String, String, Result<GameSetupResult, String>)>>,
+        Option<mpsc::Sender<(String, String, Result<RuntimePrepareOutcome, String>)>>,
     runtime_prepare_results_rx:
-        Option<Arc<Mutex<mpsc::Receiver<(String, String, Result<GameSetupResult, String>)>>>>,
+        Option<Arc<Mutex<mpsc::Receiver<(String, String, Result<RuntimePrepareOutcome, String>)>>>>,
+}
+
+#[derive(Clone, Debug)]
+struct RuntimePrepareOutcome {
+    setup: GameSetupResult,
+    configured_java: Option<(JavaRuntimeVersion, String)>,
 }
 
 impl InstanceScreenState {
@@ -107,7 +116,7 @@ pub fn render(
     text_ui: &mut TextUi,
     selected_instance_id: Option<&str>,
     instances: &mut InstanceStore,
-    config: &Config,
+    config: &mut Config,
 ) -> bool {
     let mut instances_changed = false;
     let text_color = ui.visuals().text_color();
@@ -167,7 +176,7 @@ pub fn render(
         .data_mut(|d| d.get_temp::<InstanceScreenState>(state_id))
         .unwrap_or_else(|| InstanceScreenState::from_instance(&instance_snapshot, config));
 
-    poll_background_tasks(&mut state);
+    poll_background_tasks(&mut state, config);
     sync_version_catalog(&mut state, config.include_snapshots_and_betas(), false);
     if state.version_catalog_in_flight
         || state.discover_in_flight
@@ -394,9 +403,10 @@ pub fn render(
                 state.status_message = Some("Minecraft game version cannot be empty.".to_owned());
             } else if modloader.trim().is_empty() {
                 state.status_message = Some("Modloader cannot be empty.".to_owned());
-            } else if !state
-                .loader_support
-                .supports_loader(modloader.as_str(), game_version.as_str())
+            } else if support_catalog_ready(state)
+                && !state
+                    .loader_support
+                    .supports_loader(modloader.as_str(), game_version.as_str())
                 && state.selected_modloader != CUSTOM_MODLOADER_INDEX
             {
                 state.status_message = Some(format!(
@@ -729,6 +739,10 @@ fn render_runtime_row(
                     state,
                     instance_root.to_path_buf(),
                     game_version.trim().to_owned(),
+                    selected_modloader_value(state),
+                    normalize_optional(state.modloader_version_input.as_str()),
+                    recommended_java_runtime(game_version),
+                    choose_java_executable(config, game_version),
                 );
             }
         }
@@ -844,10 +858,10 @@ fn normalize_optional(value: &str) -> Option<String> {
     }
 }
 
-fn poll_background_tasks(state: &mut InstanceScreenState) {
+fn poll_background_tasks(state: &mut InstanceScreenState, config: &mut Config) {
     poll_version_catalog(state);
     poll_discovery_search(state);
-    poll_runtime_prepare(state);
+    poll_runtime_prepare(state, config);
 }
 
 fn sync_version_catalog(
@@ -1063,7 +1077,7 @@ fn ensure_runtime_prepare_channel(state: &mut InstanceScreenState) {
     if state.runtime_prepare_results_tx.is_some() && state.runtime_prepare_results_rx.is_some() {
         return;
     }
-    let (tx, rx) = mpsc::channel::<(String, String, Result<GameSetupResult, String>)>();
+    let (tx, rx) = mpsc::channel::<(String, String, Result<RuntimePrepareOutcome, String>)>();
     state.runtime_prepare_results_tx = Some(tx);
     state.runtime_prepare_results_rx = Some(Arc::new(Mutex::new(rx)));
 }
@@ -1072,6 +1086,10 @@ fn request_runtime_prepare(
     state: &mut InstanceScreenState,
     instance_root: PathBuf,
     game_version: String,
+    modloader: String,
+    modloader_version: Option<String>,
+    required_java_runtime: Option<JavaRuntimeVersion>,
+    java_executable: Option<String>,
 ) {
     let game_version = game_version.trim().to_owned();
     if game_version.is_empty() || state.runtime_prepare_in_flight {
@@ -1088,10 +1106,48 @@ fn request_runtime_prepare(
     let instance_root_display = instance_root.display().to_string();
     let game_version_for_task = game_version.clone();
     let game_version_for_result = game_version.clone();
+    let modloader_for_task = modloader.trim().to_owned();
+    let modloader_version_for_task = modloader_version
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let java_executable_for_task = java_executable;
+    let download_policy = DownloadPolicy::default();
     let _ = tokio_runtime::spawn(async move {
         let result = tokio_runtime::spawn_blocking(move || {
-            ensure_game_files(instance_root.as_path(), game_version_for_task.as_str())
-                .map_err(|err| err.to_string())
+            let mut configured_java = None;
+            let java_path = if let Some(path) = java_executable_for_task
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+            {
+                path
+            } else if let Some(runtime) = required_java_runtime {
+                let installed = ensure_openjdk_runtime(runtime.major()).map_err(|err| {
+                    format!("failed to auto-install OpenJDK {}: {err}", runtime.major())
+                })?;
+                let installed = installed.display().to_string();
+                configured_java = Some((runtime, installed.clone()));
+                installed
+            } else {
+                "java".to_owned()
+            };
+            ensure_game_files(
+                instance_root.as_path(),
+                game_version_for_task.as_str(),
+                modloader_for_task.as_str(),
+                modloader_version_for_task.as_deref(),
+                Some(java_path.as_str()),
+                &download_policy,
+                None,
+            )
+            .map(|setup| RuntimePrepareOutcome {
+                setup,
+                configured_java,
+            })
+            .map_err(|err| err.to_string())
         })
         .await
         .map_err(|err| format!("runtime prepare task join error: {err}"))
@@ -1100,7 +1156,7 @@ fn request_runtime_prepare(
     });
 }
 
-fn poll_runtime_prepare(state: &mut InstanceScreenState) {
+fn poll_runtime_prepare(state: &mut InstanceScreenState, config: &mut Config) {
     let mut updates = Vec::new();
     let mut should_reset_channel = false;
     if let Some(rx) = state.runtime_prepare_results_rx.as_ref() {
@@ -1128,10 +1184,14 @@ fn poll_runtime_prepare(state: &mut InstanceScreenState) {
     for (game_version, instance_root_display, result) in updates {
         state.runtime_prepare_in_flight = false;
         match result {
-            Ok(setup) => {
-                state.running = true;
+            Ok(outcome) => {
+                if let Some((runtime, path)) = outcome.configured_java {
+                    config.set_java_runtime_path(runtime, Some(path));
+                }
+                let setup = outcome.setup;
+                state.running = false;
                 state.status_message = Some(format!(
-                    "Prepared Minecraft {} in {} ({} file(s) downloaded).",
+                    "Installed Minecraft {} in {} ({} file(s) downloaded). Launch execution is not wired yet.",
                     game_version, instance_root_display, setup.downloaded_files
                 ));
             }
@@ -1151,7 +1211,45 @@ fn selected_game_version(state: &InstanceScreenState) -> &str {
         .unwrap_or_else(|| state.game_version_input.as_str())
 }
 
+fn choose_java_executable(config: &Config, game_version: &str) -> Option<String> {
+    if let Some(runtime) = recommended_java_runtime(game_version)
+        && let Some(path) = config.java_runtime_path(runtime)
+    {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_owned());
+        }
+    }
+    None
+}
+
+fn recommended_java_runtime(game_version: &str) -> Option<JavaRuntimeVersion> {
+    let mut parts = game_version
+        .split('.')
+        .filter_map(|part| part.parse::<u32>().ok());
+    let major = parts.next()?;
+    let minor = parts.next()?;
+    let patch = parts.next().unwrap_or(0);
+
+    if major != 1 {
+        return Some(JavaRuntimeVersion::Java21);
+    }
+    if minor <= 16 {
+        return Some(JavaRuntimeVersion::Java8);
+    }
+    if minor == 17 {
+        return Some(JavaRuntimeVersion::Java16);
+    }
+    if minor > 20 || (minor == 20 && patch >= 5) {
+        return Some(JavaRuntimeVersion::Java21);
+    }
+    Some(JavaRuntimeVersion::Java17)
+}
+
 fn ensure_selected_modloader_is_supported(state: &mut InstanceScreenState, game_version: &str) {
+    if !support_catalog_ready(state) {
+        return;
+    }
     if state.selected_modloader == CUSTOM_MODLOADER_INDEX {
         return;
     }
@@ -1168,6 +1266,10 @@ fn ensure_selected_modloader_is_supported(state: &mut InstanceScreenState, game_
     }
 
     state.selected_modloader = 0;
+}
+
+fn support_catalog_ready(state: &InstanceScreenState) -> bool {
+    state.version_catalog_include_snapshots.is_some() && state.version_catalog_error.is_none()
 }
 
 fn render_discovery_entry(

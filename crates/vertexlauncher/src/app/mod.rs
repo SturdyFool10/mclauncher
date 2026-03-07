@@ -1,13 +1,22 @@
 use config::{
-    Config, ConfigFormat, LoadConfigResult, create_default_config, load_config, save_config,
+    Config, ConfigFormat, JavaRuntimeVersion, LoadConfigResult, create_default_config, load_config,
+    save_config,
 };
 use eframe::{self, egui};
 use egui::CentralPanel;
-use instances::{InstanceStore, create_instance, load_store, save_store as save_instance_store};
-use launcher_ui::{console, notification, screens, ui, window_effects};
+use installation::{
+    DownloadPolicy, InstallProgress, InstallProgressCallback, ensure_game_files,
+    ensure_openjdk_runtime,
+};
+use instances::{
+    InstanceRecord, InstanceStore, create_instance, instance_root_path, load_store,
+    save_store as save_instance_store,
+};
+use launcher_runtime as tokio_runtime;
+use launcher_ui::{console, install_activity, notification, screens, ui, window_effects};
 use std::fs::File;
 use std::io::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use textui::TextUi;
@@ -24,6 +33,7 @@ mod config_format_modal;
 mod create_instance_modal;
 mod fonts;
 mod native_options;
+mod taskbar_progress;
 mod webview_sign_in;
 
 struct VertexApp {
@@ -151,9 +161,10 @@ impl VertexApp {
 }
 
 impl eframe::App for VertexApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.text_ui.begin_frame(ctx);
         self.auth.poll();
+        apply_install_activity_os_feedback(ctx, frame);
         if self.auth.should_request_repaint() {
             ctx.request_repaint_after(REPAINT_INTERVAL);
         }
@@ -279,6 +290,11 @@ impl eframe::App for VertexApp {
                         draft.into_new_instance_spec(),
                     ) {
                         Ok(instance) => {
+                            start_initial_instance_install(
+                                &instance,
+                                installations_root.as_path(),
+                                &self.config,
+                            );
                             self.selected_instance_id = Some(instance.id);
                             self.active_screen = screens::AppScreen::Instance;
                             self.show_create_instance_modal = false;
@@ -328,6 +344,215 @@ impl eframe::App for VertexApp {
 
         ui::top_bar::handle_window_resize(ctx);
     }
+}
+
+fn apply_install_activity_os_feedback(ctx: &egui::Context, frame: &eframe::Frame) {
+    if let Some(activity) = install_activity::snapshot() {
+        let fraction = if activity.total_files > 0 {
+            (activity.downloaded_files as f32 / activity.total_files as f32).clamp(0.0, 1.0)
+        } else if let Some(total) = activity.total_bytes {
+            if total > 0 {
+                (activity.downloaded_bytes as f32 / total as f32).clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+        let percent = (fraction * 100.0).round() as u32;
+        let speed_mib = activity.bytes_per_second / (1024.0 * 1024.0);
+        let eta_suffix = activity
+            .eta_seconds
+            .map(|eta| format!(" ETA {}s", eta))
+            .unwrap_or_default();
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
+            "Vertex Launcher · Installing {}% · {:.1} MiB/s{}",
+            percent, speed_mib, eta_suffix
+        )));
+        ctx.output_mut(|o| o.cursor_icon = egui::CursorIcon::Progress);
+        taskbar_progress::set_install_progress(frame, Some(fraction));
+        return;
+    }
+
+    ctx.send_viewport_cmd(egui::ViewportCommand::Title("Vertex Launcher".to_owned()));
+    taskbar_progress::set_install_progress(frame, None);
+}
+
+fn start_initial_instance_install(
+    instance: &InstanceRecord,
+    installations_root: &Path,
+    config: &Config,
+) {
+    let instance_name = instance.name.clone();
+    let game_version = instance.game_version.trim().to_owned();
+    let modloader = instance.modloader.trim().to_owned();
+    let modloader_version = {
+        let trimmed = instance.modloader_version.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_owned())
+        }
+    };
+    if game_version.is_empty() || modloader.is_empty() {
+        return;
+    }
+
+    let instance_root = instance_root_path(installations_root, instance);
+    let download_policy = DownloadPolicy {
+        starts_per_second: config.download_starts_per_second().max(1),
+        max_download_bps: config.parsed_download_speed_limit_bps(),
+    };
+    let java_8 = config
+        .java_runtime_path(JavaRuntimeVersion::Java8)
+        .map(str::to_owned);
+    let java_16 = config
+        .java_runtime_path(JavaRuntimeVersion::Java16)
+        .map(str::to_owned);
+    let java_17 = config
+        .java_runtime_path(JavaRuntimeVersion::Java17)
+        .map(str::to_owned);
+    let java_21 = config
+        .java_runtime_path(JavaRuntimeVersion::Java21)
+        .map(str::to_owned);
+
+    let notification_source = format!("installation/{instance_name}");
+    notification::progress!(
+        notification::Severity::Info,
+        notification_source.clone(),
+        0.0f32,
+        "Starting initial install: Minecraft {} / {}.",
+        game_version,
+        modloader
+    );
+
+    let _ = tokio_runtime::spawn(async move {
+        let last_emit = Arc::new(Mutex::new(
+            std::time::Instant::now() - std::time::Duration::from_secs(1),
+        ));
+        let notification_source_for_progress = notification_source.clone();
+        let result = tokio_runtime::spawn_blocking(move || {
+            let progress_callback: InstallProgressCallback = {
+                let last_emit = Arc::clone(&last_emit);
+                Arc::new(move |progress: InstallProgress| {
+                    let should_emit = if let Ok(mut last) = last_emit.lock() {
+                        if last.elapsed() >= std::time::Duration::from_millis(250) {
+                            *last = std::time::Instant::now();
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    if !should_emit {
+                        return;
+                    }
+                    let fraction = if progress.total_files > 0 {
+                        (progress.downloaded_files as f32 / progress.total_files as f32)
+                            .clamp(0.0, 1.0)
+                    } else if let Some(total) = progress.total_bytes {
+                        if total > 0 {
+                            (progress.downloaded_bytes as f32 / total as f32).clamp(0.0, 1.0)
+                        } else {
+                            0.0
+                        }
+                    } else {
+                        0.0
+                    };
+                    notification::progress!(
+                        notification::Severity::Info,
+                        notification_source_for_progress.clone(),
+                        fraction,
+                        "{} · {:.1} MiB/s{}",
+                        progress.message,
+                        progress.bytes_per_second / (1024.0 * 1024.0),
+                        progress
+                            .eta_seconds
+                            .map(|eta| format!(" · ETA {}s", eta))
+                            .unwrap_or_default()
+                    );
+                })
+            };
+            let runtime = recommended_java_runtime_for_game(game_version.as_str());
+            let configured_java = runtime.and_then(|runtime| match runtime {
+                JavaRuntimeVersion::Java8 => java_8.as_deref(),
+                JavaRuntimeVersion::Java16 => java_16.as_deref(),
+                JavaRuntimeVersion::Java17 => java_17.as_deref(),
+                JavaRuntimeVersion::Java21 => java_21.as_deref(),
+            });
+            let java_path = configured_java
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .or_else(|| {
+                    runtime.and_then(|runtime| {
+                        ensure_openjdk_runtime(runtime.major())
+                            .ok()
+                            .map(|path| path.display().to_string())
+                    })
+                })
+                .unwrap_or_else(|| "java".to_owned());
+
+            ensure_game_files(
+                instance_root.as_path(),
+                game_version.as_str(),
+                modloader.as_str(),
+                modloader_version.as_deref(),
+                Some(java_path.as_str()),
+                &download_policy,
+                Some(progress_callback),
+            )
+            .map_err(|err| err.to_string())
+        })
+        .await
+        .map_err(|err| format!("initial install task join error: {err}"))
+        .and_then(|inner| inner);
+
+        match result {
+            Ok(setup) => {
+                notification::progress!(
+                    notification::Severity::Info,
+                    notification_source,
+                    1.0f32,
+                    "Initial install complete ({} files, loader {}).",
+                    setup.downloaded_files,
+                    setup.resolved_modloader_version.as_deref().unwrap_or("n/a")
+                );
+            }
+            Err(err) => {
+                notification::error!(
+                    notification_source,
+                    "{}: initial install failed: {}",
+                    instance_name,
+                    err
+                );
+            }
+        }
+    });
+}
+
+fn recommended_java_runtime_for_game(game_version: &str) -> Option<JavaRuntimeVersion> {
+    let mut parts = game_version
+        .split('.')
+        .filter_map(|part| part.parse::<u32>().ok());
+    let major = parts.next()?;
+    let minor = parts.next()?;
+    let patch = parts.next().unwrap_or(0);
+
+    if major != 1 {
+        return Some(JavaRuntimeVersion::Java21);
+    }
+    if minor <= 16 {
+        return Some(JavaRuntimeVersion::Java8);
+    }
+    if minor == 17 {
+        return Some(JavaRuntimeVersion::Java16);
+    }
+    if minor > 20 || (minor == 20 && patch >= 5) {
+        return Some(JavaRuntimeVersion::Java21);
+    }
+    Some(JavaRuntimeVersion::Java17)
 }
 
 pub fn run() -> eframe::Result<()> {
