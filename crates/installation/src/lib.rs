@@ -760,10 +760,10 @@ struct RunningInstanceProcess {
     account_key: Option<String>,
 }
 
-static RUNNING_INSTANCE_PROCESSES: OnceLock<Mutex<HashMap<String, RunningInstanceProcess>>> =
+static RUNNING_INSTANCE_PROCESSES: OnceLock<Mutex<HashMap<String, Vec<RunningInstanceProcess>>>> =
     OnceLock::new();
 
-fn process_registry() -> &'static Mutex<HashMap<String, RunningInstanceProcess>> {
+fn process_registry() -> &'static Mutex<HashMap<String, Vec<RunningInstanceProcess>>> {
     RUNNING_INSTANCE_PROCESSES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -774,32 +774,51 @@ pub fn launch_instance(request: &LaunchRequest) -> Result<LaunchResult, Installa
     let requested_account = normalize_account_key(request.account_key.as_deref());
     if let Ok(mut processes) = process_registry().lock() {
         prune_finished_processes(&mut processes);
-        if let Some(process) = processes.get_mut(instance_key.as_str()) {
-            if let Ok(None) = process.child.try_wait() {
+        if let Some(instance_processes) = processes.get_mut(instance_key.as_str()) {
+            let same_account_already_running = instance_processes.iter_mut().find_map(|process| {
+                if !matches!(process.child.try_wait(), Ok(None)) {
+                    return None;
+                }
+                let matches_account = match requested_account.as_deref() {
+                    Some(account) => process
+                        .account_key
+                        .as_deref()
+                        .is_some_and(|running| running == account),
+                    None => process.account_key.is_none(),
+                };
+                if matches_account {
+                    Some(process.child.id())
+                } else {
+                    None
+                }
+            });
+            if let Some(pid) = same_account_already_running {
                 return Err(InstallationError::InstanceAlreadyRunning {
                     instance_root: instance_key,
-                    pid: process.child.id(),
+                    pid,
                 });
             }
         }
         if let Some(account) = requested_account.as_deref() {
-            for (running_instance_root, process) in processes.iter_mut() {
+            for (running_instance_root, instance_processes) in processes.iter_mut() {
                 if running_instance_root == &instance_key {
                     continue;
                 }
-                if process
-                    .account_key
-                    .as_deref()
-                    .is_some_and(|in_use| in_use == account)
-                    && let Ok(None) = process.child.try_wait()
-                {
-                    return Err(InstallationError::AccountAlreadyInUse {
-                        account: request
-                            .account_key
-                            .clone()
-                            .unwrap_or_else(|| account.to_owned()),
-                        instance_root: running_instance_root.clone(),
-                    });
+                for process in instance_processes {
+                    if process
+                        .account_key
+                        .as_deref()
+                        .is_some_and(|in_use| in_use == account)
+                        && let Ok(None) = process.child.try_wait()
+                    {
+                        return Err(InstallationError::AccountAlreadyInUse {
+                            account: request
+                                .account_key
+                                .clone()
+                                .unwrap_or_else(|| account.to_owned()),
+                            instance_root: running_instance_root.clone(),
+                        });
+                    }
                 }
             }
         }
@@ -892,13 +911,13 @@ pub fn launch_instance(request: &LaunchRequest) -> Result<LaunchResult, Installa
     }
     let pid = child.id();
     if let Ok(mut processes) = process_registry().lock() {
-        processes.insert(
-            instance_root.display().to_string(),
-            RunningInstanceProcess {
+        processes
+            .entry(instance_root.display().to_string())
+            .or_default()
+            .push(RunningInstanceProcess {
                 child,
                 account_key: requested_account,
-            },
-        );
+            });
     }
     Ok(LaunchResult {
         pid,
@@ -912,12 +931,54 @@ pub fn stop_running_instance(instance_root: &Path) -> bool {
     let Ok(mut processes) = process_registry().lock() else {
         return false;
     };
-    let Some(mut process) = processes.remove(key.as_str()) else {
+    let Some(mut instance_processes) = processes.remove(key.as_str()) else {
         return false;
     };
-    let _ = process.child.kill();
-    let _ = process.child.wait();
-    true
+    let mut stopped = false;
+    for process in &mut instance_processes {
+        if matches!(process.child.try_wait(), Ok(None)) {
+            let _ = process.child.kill();
+            let _ = process.child.wait();
+            stopped = true;
+        }
+    }
+    stopped
+}
+
+pub fn stop_running_instance_for_account(instance_root: &Path, account_key: &str) -> bool {
+    let Some(account) = normalize_account_key(Some(account_key)) else {
+        return false;
+    };
+    let key = instance_process_key(instance_root);
+    let Ok(mut processes) = process_registry().lock() else {
+        return false;
+    };
+    let mut removed_any = false;
+    let mut emptied = false;
+    if let Some(instance_processes) = processes.get_mut(key.as_str()) {
+        let mut index = 0usize;
+        while index < instance_processes.len() {
+            let matches_account = instance_processes[index]
+                .account_key
+                .as_deref()
+                .is_some_and(|value| value == account);
+            if matches_account {
+                let mut process = instance_processes.remove(index);
+                if matches!(process.child.try_wait(), Ok(None)) {
+                    let _ = process.child.kill();
+                    let _ = process.child.wait();
+                    removed_any = true;
+                }
+                continue;
+            }
+            index += 1;
+        }
+        emptied = instance_processes.is_empty();
+    }
+    if emptied {
+        let _ = processes.remove(key.as_str());
+    }
+    removed_any
 }
 
 pub fn is_instance_running(instance_root: &Path) -> bool {
@@ -926,12 +987,35 @@ pub fn is_instance_running(instance_root: &Path) -> bool {
         return false;
     };
     prune_finished_processes(&mut processes);
-    if let Some(process) = processes.get_mut(key.as_str())
-        && let Ok(None) = process.child.try_wait()
-    {
-        return true;
-    }
-    false
+    processes
+        .get_mut(key.as_str())
+        .is_some_and(|instance_processes| {
+            instance_processes
+                .iter_mut()
+                .any(|process| matches!(process.child.try_wait(), Ok(None)))
+        })
+}
+
+pub fn is_instance_running_for_account(instance_root: &Path, account_key: &str) -> bool {
+    let Some(account) = normalize_account_key(Some(account_key)) else {
+        return false;
+    };
+    let key = instance_process_key(instance_root);
+    let Ok(mut processes) = process_registry().lock() else {
+        return false;
+    };
+    prune_finished_processes(&mut processes);
+    processes
+        .get_mut(key.as_str())
+        .is_some_and(|instance_processes| {
+            instance_processes.iter_mut().any(|process| {
+                process
+                    .account_key
+                    .as_deref()
+                    .is_some_and(|value| value == account)
+                    && matches!(process.child.try_wait(), Ok(None))
+            })
+        })
 }
 
 pub fn running_instance_for_account(account_key: &str) -> Option<String> {
@@ -940,18 +1024,39 @@ pub fn running_instance_for_account(account_key: &str) -> Option<String> {
         return None;
     };
     prune_finished_processes(&mut processes);
-    processes.iter_mut().find_map(|(instance_root, process)| {
-        if process
-            .account_key
-            .as_deref()
-            .is_some_and(|value| value == account)
-            && matches!(process.child.try_wait(), Ok(None))
-        {
-            Some(instance_root.clone())
-        } else {
-            None
-        }
-    })
+    processes
+        .iter_mut()
+        .find_map(|(instance_root, instance_processes)| {
+            if instance_processes.iter_mut().any(|process| {
+                process
+                    .account_key
+                    .as_deref()
+                    .is_some_and(|value| value == account)
+                    && matches!(process.child.try_wait(), Ok(None))
+            }) {
+                Some(instance_root.clone())
+            } else {
+                None
+            }
+        })
+}
+
+pub fn running_account_for_instance(instance_root: &Path) -> Option<String> {
+    let key = instance_process_key(instance_root);
+    let Ok(mut processes) = process_registry().lock() else {
+        return None;
+    };
+    prune_finished_processes(&mut processes);
+    processes
+        .get_mut(key.as_str())?
+        .iter_mut()
+        .find_map(|process| {
+            if matches!(process.child.try_wait(), Ok(None)) {
+                process.account_key.clone()
+            } else {
+                None
+            }
+        })
 }
 
 pub fn running_instance_roots() -> Vec<String> {
@@ -962,8 +1067,11 @@ pub fn running_instance_roots() -> Vec<String> {
     processes.keys().cloned().collect()
 }
 
-fn prune_finished_processes(processes: &mut HashMap<String, RunningInstanceProcess>) {
-    processes.retain(|_, process| matches!(process.child.try_wait(), Ok(None)));
+fn prune_finished_processes(processes: &mut HashMap<String, Vec<RunningInstanceProcess>>) {
+    processes.retain(|_, instance_processes| {
+        instance_processes.retain_mut(|process| matches!(process.child.try_wait(), Ok(None)));
+        !instance_processes.is_empty()
+    });
 }
 
 fn instance_process_key(instance_root: &Path) -> String {

@@ -14,6 +14,7 @@ use instances::{
 };
 use launcher_runtime as tokio_runtime;
 use launcher_ui::{console, install_activity, notification, screens, ui, window_effects};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -184,16 +185,23 @@ impl eframe::App for VertexApp {
         self.fonts
             .apply_from_config(ctx, &self.config, &mut self.text_ui);
 
-        let profile_accounts = self
-            .auth
-            .account_entries()
-            .into_iter()
+        let account_entries = self.auth.account_entries();
+        let profile_accounts = account_entries
+            .iter()
             .map(|entry| ui::top_bar::ProfileAccountOption {
-                profile_id: entry.profile_id,
-                display_name: entry.display_name,
+                profile_id: entry.profile_id.clone(),
+                display_name: entry.display_name.clone(),
                 is_active: entry.is_active,
             })
             .collect::<Vec<_>>();
+        let account_avatars_by_key = account_entries
+            .into_iter()
+            .filter_map(|entry| {
+                entry
+                    .avatar_png
+                    .map(|avatar| (entry.profile_id.to_ascii_lowercase(), avatar))
+            })
+            .collect::<HashMap<_, _>>();
         let active_launch_auth =
             self.auth
                 .active_launch_context()
@@ -291,6 +299,7 @@ impl eframe::App for VertexApp {
                     self.auth.active_account_owns_minecraft(),
                     &mut self.config,
                     &mut self.instance_store,
+                    &account_avatars_by_key,
                     self.fonts.available_ui_fonts(),
                     self.theme_catalog.themes(),
                     &mut self.text_ui,
@@ -299,6 +308,9 @@ impl eframe::App for VertexApp {
 
         if screen_output.instances_changed {
             self.refresh_instance_shortcuts();
+        }
+        if let Some(instance_id) = screen_output.selected_instance_id {
+            self.selected_instance_id = Some(instance_id);
         }
         if let Some(requested_screen) = screen_output.requested_screen {
             self.active_screen = requested_screen;

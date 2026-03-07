@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use config::{Config, UiFontFamily};
 use egui::Ui;
 use instances::InstanceStore;
@@ -43,10 +45,11 @@ impl AppScreen {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ScreenOutput {
     pub instances_changed: bool,
     pub requested_screen: Option<AppScreen>,
+    pub selected_instance_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -68,14 +71,32 @@ pub fn render(
     active_account_owns_minecraft: bool,
     config: &mut Config,
     instances: &mut InstanceStore,
+    account_avatars_by_key: &HashMap<String, Vec<u8>>,
     available_ui_fonts: &[UiFontFamily],
     available_themes: &[Theme],
     text_ui: &mut TextUi,
 ) -> ScreenOutput {
     match screen {
         AppScreen::Library => {
-            library::render(ui, text_ui, selected_instance_id, instances);
-            ScreenOutput::default()
+            let installations_root =
+                std::path::PathBuf::from(config.minecraft_installations_root());
+            let output = library::render(
+                ui,
+                text_ui,
+                selected_instance_id,
+                active_username,
+                active_launch_auth,
+                active_account_owns_minecraft,
+                instances,
+                installations_root.as_path(),
+                config,
+                account_avatars_by_key,
+            );
+            ScreenOutput {
+                instances_changed: false,
+                requested_screen: output.requested_screen,
+                selected_instance_id: output.selected_instance_id,
+            }
         }
         AppScreen::Skins => {
             skins::render(ui, text_ui, selected_instance_id);
@@ -103,10 +124,12 @@ pub fn render(
                 active_account_owns_minecraft,
                 instances,
                 config,
+                account_avatars_by_key,
             );
             ScreenOutput {
                 instances_changed: output.instances_changed,
                 requested_screen: output.requested_screen,
+                selected_instance_id: None,
             }
         }
     }

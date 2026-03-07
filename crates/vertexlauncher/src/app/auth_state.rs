@@ -41,6 +41,7 @@ pub struct AccountUiEntry {
     pub profile_id: String,
     pub display_name: String,
     pub is_active: bool,
+    pub avatar_png: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug)]
@@ -269,6 +270,7 @@ impl AuthState {
                 is_active: active_id
                     .map(|id| id == account.minecraft_profile.id)
                     .unwrap_or(false),
+                avatar_png: account.avatar_png_bytes(),
             })
             .collect::<Vec<_>>();
 

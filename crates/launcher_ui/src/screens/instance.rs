@@ -7,8 +7,8 @@ use installation::{
     DownloadPolicy, GameSetupResult, InstallProgress, InstallProgressCallback, InstallStage,
     LaunchRequest, LaunchResult, LoaderSupportIndex, LoaderVersionIndex, MinecraftVersionEntry,
     VersionCatalog, ensure_game_files, ensure_openjdk_runtime, fetch_loader_versions_for_game,
-    fetch_version_catalog_with_refresh, is_instance_running, launch_instance,
-    running_instance_for_account, stop_running_instance,
+    fetch_version_catalog_with_refresh, is_instance_running_for_account, launch_instance,
+    running_instance_for_account, stop_running_instance_for_account,
 };
 use instances::{InstanceStore, set_instance_settings, set_instance_versions};
 use modprovider::{ContentSource, UnifiedContentEntry, search_minecraft_content};
@@ -215,6 +215,7 @@ pub fn render(
     active_account_owns_minecraft: bool,
     instances: &mut InstanceStore,
     config: &mut Config,
+    account_avatars_by_key: &HashMap<String, Vec<u8>>,
 ) -> InstanceScreenOutput {
     let mut output = InstanceScreenOutput::default();
     let text_color = ui.visuals().text_color();
@@ -314,6 +315,7 @@ pub fn render(
         active_username,
         active_launch_auth,
         active_account_owns_minecraft,
+        account_avatars_by_key,
     );
     render_install_feedback(
         ui,
@@ -1588,6 +1590,7 @@ fn render_runtime_row(
     active_username: Option<&str>,
     active_launch_auth: Option<&LaunchAuthContext>,
     active_account_owns_minecraft: bool,
+    account_avatars_by_key: &HashMap<String, Vec<u8>>,
 ) {
     let button_style = ButtonOptions {
         min_size: egui::vec2(120.0, 34.0),
@@ -1626,32 +1629,54 @@ fn render_runtime_row(
     let launch_access_token = active_launch_auth.map(|auth| auth.access_token.clone());
     let launch_xuid = active_launch_auth.and_then(|auth| auth.xuid.clone());
     let launch_user_type = active_launch_auth.map(|auth| auth.user_type.clone());
+    let runtime_running_for_active_account = launch_account
+        .as_deref()
+        .is_some_and(|account| is_instance_running_for_account(instance_root, account));
     let account_running_root = launch_account
         .as_deref()
         .and_then(running_instance_for_account);
-    let launch_disabled_for_account = !state.running
+    let launch_disabled_for_account = !runtime_running_for_active_account
         && account_running_root
             .as_deref()
             .is_some_and(|running_root| running_root != instance_root_key.as_str());
-    let launch_disabled_for_missing_ownership = !state.running && !active_account_owns_minecraft;
+    let launch_disabled_for_missing_ownership =
+        !runtime_running_for_active_account && !active_account_owns_minecraft;
     let launch_disabled = launch_disabled_for_account || launch_disabled_for_missing_ownership;
+
+    let running_account_key = if runtime_running_for_active_account {
+        launch_player_uuid
+            .clone()
+            .or_else(|| launch_account.clone())
+            .or_else(|| state.launch_user_key.clone())
+            .map(|value| value.to_ascii_lowercase())
+    } else {
+        None
+    };
+    let running_avatar_png = running_account_key
+        .as_deref()
+        .and_then(|key| account_avatars_by_key.get(key))
+        .map(Vec::as_slice);
+    let runtime_running = runtime_running_for_active_account;
+    state.running = runtime_running;
 
     ui.horizontal(|ui| {
         if !state.runtime_prepare_in_flight && !external_install_active {
-            let action_label = if state.running { "Stop" } else { "Launch" };
             let response = ui
                 .add_enabled_ui(!launch_disabled, |ui| {
-                    text_ui.button(
-                        ui,
-                        ("instance_runtime_toggle", id),
-                        action_label,
-                        &button_style,
-                    )
+                    if runtime_running {
+                        render_stop_runtime_button(ui, id, &button_style, running_avatar_png)
+                    } else {
+                        text_ui.button(ui, ("instance_runtime_toggle", id), "Launch", &button_style)
+                    }
                 })
                 .inner;
-            if response.clicked() {
-                if state.running {
-                    if stop_running_instance(instance_root) {
+            let toggle_requested = response.clicked();
+            if toggle_requested {
+                if runtime_running {
+                    let stopped = launch_account.as_deref().is_some_and(|account| {
+                        stop_running_instance_for_account(instance_root, account)
+                    });
+                    if stopped {
                         state.running = false;
                         state.status_message = Some("Stopped instance runtime.".to_owned());
                     } else {
@@ -1765,7 +1790,11 @@ fn render_runtime_row(
         );
     }
 
-    if state.running && !is_instance_running(instance_root) {
+    if state.running
+        && !launch_account
+            .as_deref()
+            .is_some_and(|account| is_instance_running_for_account(instance_root, account))
+    {
         state.running = false;
         state.status_message = Some("Minecraft process exited.".to_owned());
     }
@@ -1832,6 +1861,103 @@ fn render_modloader_selector(
             }
         }
     });
+}
+
+fn render_stop_runtime_button(
+    ui: &mut Ui,
+    id: &str,
+    style: &ButtonOptions,
+    avatar_png: Option<&[u8]>,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(style.min_size, egui::Sense::click());
+    let error_color = ui.visuals().error_fg_color;
+    let fill_base = egui::Color32::from_rgba_premultiplied(
+        error_color.r(),
+        error_color.g(),
+        error_color.b(),
+        36,
+    );
+    let fill = if response.is_pointer_button_down_on() {
+        fill_base.gamma_multiply(0.85)
+    } else if response.hovered() {
+        fill_base.gamma_multiply(1.25)
+    } else {
+        fill_base
+    };
+    let stroke = egui::Stroke::new(style.stroke.width.max(1.0), error_color);
+
+    ui.painter()
+        .rect_filled(rect, egui::CornerRadius::same(style.corner_radius), fill);
+    ui.painter().rect_stroke(
+        rect,
+        egui::CornerRadius::same(style.corner_radius),
+        stroke,
+        egui::StrokeKind::Inside,
+    );
+
+    let inner_rect = rect.shrink2(style.padding);
+    let avatar_size = (inner_rect.height() - 2.0).clamp(12.0, 20.0);
+    let avatar_rect =
+        egui::Rect::from_min_size(inner_rect.min, egui::vec2(avatar_size, avatar_size));
+    render_runtime_avatar(ui, id, avatar_rect, avatar_png, error_color);
+
+    let icon_lane = egui::Rect::from_min_max(
+        egui::pos2(
+            (avatar_rect.max.x + 8.0).min(inner_rect.max.x),
+            inner_rect.min.y,
+        ),
+        inner_rect.max,
+    );
+    let icon_size = (icon_lane.height() - 4.0).clamp(12.0, 18.0);
+    let stop_icon_rect =
+        egui::Rect::from_center_size(icon_lane.center(), egui::vec2(icon_size, icon_size));
+    let stop_icon = egui::Image::from_bytes(
+        format!(
+            "bytes://instance/runtime-stop/{id}-{:02x}{:02x}{:02x}",
+            error_color.r(),
+            error_color.g(),
+            error_color.b()
+        ),
+        apply_color_to_svg(assets::STOP_SVG, error_color),
+    )
+    .fit_to_exact_size(egui::vec2(icon_size, icon_size));
+    let _ = ui.put(stop_icon_rect, stop_icon);
+
+    response
+}
+
+fn render_runtime_avatar(
+    ui: &mut Ui,
+    id: &str,
+    rect: egui::Rect,
+    avatar_png: Option<&[u8]>,
+    color: egui::Color32,
+) {
+    if let Some(bytes) = avatar_png {
+        let mut hasher = DefaultHasher::new();
+        id.hash(&mut hasher);
+        bytes.hash(&mut hasher);
+        let image = egui::Image::from_bytes(
+            format!("bytes://instance/runtime-avatar/{}", hasher.finish()),
+            bytes.to_vec(),
+        )
+        .fit_to_exact_size(rect.size());
+        let _ = ui.put(rect, image);
+        return;
+    }
+
+    let fallback = egui::Image::from_bytes(
+        format!("bytes://instance/runtime-avatar-fallback/{id}"),
+        apply_color_to_svg(assets::USER_SVG, color),
+    )
+    .fit_to_exact_size(rect.size());
+    let _ = ui.put(rect, fallback);
+}
+
+fn apply_color_to_svg(svg_bytes: &[u8], color: egui::Color32) -> Vec<u8> {
+    let color_hex = format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b());
+    let svg = String::from_utf8_lossy(svg_bytes).replace("currentColor", &color_hex);
+    svg.into_bytes()
 }
 
 fn split_modloader(modloader: &str) -> (usize, String) {
