@@ -450,6 +450,17 @@ pub fn render(
                 ));
             } else {
                 let mut update_failed = None;
+                let requested_modloader = modloader.clone();
+                let requested_game_version = game_version.clone();
+                let requested_modloader_version = state.modloader_version_input.trim().to_owned();
+                tracing::info!(
+                    target: "vertexlauncher/ui/instance",
+                    instance_id = %instance_id,
+                    requested_modloader = %requested_modloader,
+                    requested_game_version = %requested_game_version,
+                    requested_modloader_version = %requested_modloader_version,
+                    "Saving instance metadata and versions from instance screen."
+                );
 
                 if let Some(instance) = instances.find_mut(instance_id) {
                     instance.name = trimmed_name.to_owned();
@@ -464,16 +475,32 @@ pub fn render(
                         instance_id,
                         modloader,
                         game_version,
-                        state.modloader_version_input.trim().to_owned(),
+                        requested_modloader_version,
                     )
                 {
                     update_failed = Some(err.to_string());
                 }
 
                 if let Some(err) = update_failed {
+                    tracing::warn!(
+                        target: "vertexlauncher/ui/instance",
+                        instance_id = %instance_id,
+                        error = %err,
+                        "Failed to save instance metadata and versions."
+                    );
                     state.status_message = Some(err);
                 } else {
                     instances_changed = true;
+                    if let Some(saved) = instances.find(instance_id) {
+                        tracing::info!(
+                            target: "vertexlauncher/ui/instance",
+                            instance_id = %instance_id,
+                            saved_modloader = %saved.modloader,
+                            saved_game_version = %saved.game_version,
+                            saved_modloader_version = %saved.modloader_version,
+                            "Saved instance metadata and versions."
+                        );
+                    }
                     state.status_message = Some("Saved metadata and version settings.".to_owned());
                 }
             }
@@ -951,7 +978,9 @@ fn render_runtime_row(
                         config.default_instance_max_memory_mib()
                     };
                     let extra_jvm_args = normalize_optional(state.cli_args_input.as_str());
-                    state.launch_username = launch_account.clone();
+                    state.launch_username = launch_display_name
+                        .clone()
+                        .or_else(|| launch_account.clone());
                     request_runtime_prepare(
                         state,
                         instance_root.to_path_buf(),
@@ -992,7 +1021,7 @@ fn render_runtime_row(
             ui.spinner();
         }
         if launch_disabled_for_account {
-            let blocked_account = launch_account.as_deref().unwrap_or("this account");
+            let blocked_account = launch_display_name.as_deref().unwrap_or("this account");
             let _ = text_ui.label(
                 ui,
                 ("instance_runtime_account_locked", id),
@@ -1421,7 +1450,11 @@ fn request_runtime_prepare(
         .or(player_name_for_task.as_deref())
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("Player");
-    let tab_id = console::ensure_instance_tab(state.name_input.as_str(), username);
+    let tab_id = console::ensure_instance_tab(
+        state.name_input.as_str(),
+        username,
+        instance_root_display.as_str(),
+    );
     console::push_line_to_tab(
         tab_id.as_str(),
         format!(
@@ -1600,7 +1633,11 @@ fn poll_runtime_prepare(state: &mut InstanceScreenState, config: &mut Config) {
                     .as_deref()
                     .filter(|value| !value.trim().is_empty())
                     .unwrap_or("Player");
-                let tab_id = console::ensure_instance_tab(state.name_input.as_str(), username);
+                let tab_id = console::ensure_instance_tab(
+                    state.name_input.as_str(),
+                    username,
+                    instance_root_display.as_str(),
+                );
                 console::push_line_to_tab(
                     tab_id.as_str(),
                     format!(
@@ -1774,7 +1811,12 @@ fn ensure_selected_modloader_is_supported(state: &mut InstanceScreenState, game_
         return;
     }
 
-    state.selected_modloader = 0;
+    tracing::warn!(
+        target: "vertexlauncher/ui/instance",
+        selected_modloader = %selected_label,
+        game_version = %game_version,
+        "Selected modloader is not currently marked supported for this game version; keeping user selection."
+    );
 }
 
 fn support_catalog_ready(state: &InstanceScreenState) -> bool {

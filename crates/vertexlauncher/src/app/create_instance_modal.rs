@@ -967,7 +967,12 @@ fn ensure_selected_modloader_is_supported(state: &mut CreateInstanceState, game_
         return;
     }
 
-    state.selected_modloader = 0;
+    tracing::warn!(
+        target: "vertexlauncher/ui/create_instance",
+        selected_modloader = %selected_label,
+        game_version = %game_version,
+        "Selected modloader is not currently marked supported for this game version; keeping user selection."
+    );
 }
 
 fn build_draft(state: &CreateInstanceState) -> Result<CreateInstanceDraft, String> {
@@ -1006,7 +1011,24 @@ fn build_draft(state: &CreateInstanceState) -> Result<CreateInstanceDraft, Strin
         ));
     }
 
-    let modloader_version = state.modloader_version.trim().to_owned();
+    let raw_modloader_version = state.modloader_version.trim();
+    let modloader_version = if matches!(
+        normalized_loader_label_for_modal(modloader.as_str()),
+        LoaderSelectionKind::Vanilla | LoaderSelectionKind::Custom
+    ) {
+        raw_modloader_version.to_owned()
+    } else if raw_modloader_version.is_empty()
+        || is_latest_modloader_version_alias(raw_modloader_version)
+    {
+        resolve_latest_modloader_version_from_state(state, modloader.as_str(), game_version)
+            .ok_or_else(|| {
+                format!(
+                    "Could not resolve latest {modloader} version for Minecraft {game_version}. Refresh modloader versions and try again."
+                )
+            })?
+    } else {
+        raw_modloader_version.to_owned()
+    };
     let thumbnail_path = {
         let trimmed = state.thumbnail_path.trim();
         if trimmed.is_empty() {
@@ -1027,4 +1049,57 @@ fn build_draft(state: &CreateInstanceState) -> Result<CreateInstanceDraft, Strin
 
 fn support_catalog_ready(state: &CreateInstanceState) -> bool {
     state.version_catalog_include_snapshots.is_some() && state.version_catalog_error.is_none()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LoaderSelectionKind {
+    Vanilla,
+    Fabric,
+    Forge,
+    NeoForge,
+    Quilt,
+    Custom,
+}
+
+fn normalized_loader_label_for_modal(label: &str) -> LoaderSelectionKind {
+    match label.trim().to_ascii_lowercase().as_str() {
+        "vanilla" => LoaderSelectionKind::Vanilla,
+        "fabric" => LoaderSelectionKind::Fabric,
+        "forge" => LoaderSelectionKind::Forge,
+        "neoforge" => LoaderSelectionKind::NeoForge,
+        "quilt" => LoaderSelectionKind::Quilt,
+        _ => LoaderSelectionKind::Custom,
+    }
+}
+
+fn is_latest_modloader_version_alias(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "latest" | "latest available" | "use latest version" | "auto" | "default"
+    )
+}
+
+fn resolve_latest_modloader_version_from_state(
+    state: &CreateInstanceState,
+    modloader_label: &str,
+    game_version: &str,
+) -> Option<String> {
+    if game_version.trim().is_empty() {
+        return None;
+    }
+
+    if let Some(version) = state
+        .loader_versions
+        .versions_for_loader(modloader_label, game_version)
+        .and_then(|versions| versions.first())
+    {
+        return Some(version.clone());
+    }
+
+    let key = modloader_versions_cache_key(modloader_label, game_version);
+    state
+        .modloader_versions_cache
+        .get(&key)
+        .and_then(|versions| versions.first().cloned())
 }

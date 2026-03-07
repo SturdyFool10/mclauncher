@@ -1,9 +1,11 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 const MAX_CONSOLE_LINES: usize = 4000;
 const DEFAULT_TAB_ID: &str = "vertexlauncher";
 const DEFAULT_TAB_LABEL: &str = "VertexLauncher";
+const INSTANCE_TAB_PRUNE_GRACE: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug)]
 pub struct ConsoleTabSnapshot {
@@ -22,6 +24,8 @@ pub struct ConsoleSnapshot {
 struct ConsoleTab {
     id: String,
     label: String,
+    instance_root: Option<String>,
+    missing_since: Option<Instant>,
     lines: VecDeque<String>,
 }
 
@@ -39,6 +43,8 @@ fn store() -> &'static Mutex<ConsoleState> {
             tabs: vec![ConsoleTab {
                 id: DEFAULT_TAB_ID.to_owned(),
                 label: DEFAULT_TAB_LABEL.to_owned(),
+                instance_root: None,
+                missing_since: None,
                 lines: VecDeque::new(),
             }],
             active_tab_id: DEFAULT_TAB_ID.to_owned(),
@@ -63,7 +69,7 @@ pub fn push_line_to_tab(tab_id: &str, line: impl Into<String>) {
     }
 }
 
-pub fn ensure_instance_tab(instance_name: &str, username: &str) -> String {
+pub fn ensure_instance_tab(instance_name: &str, username: &str, instance_root: &str) -> String {
     let trimmed_instance = instance_name.trim();
     let trimmed_user = username.trim();
     let instance = if trimmed_instance.is_empty() {
@@ -82,19 +88,75 @@ pub fn ensure_instance_tab(instance_name: &str, username: &str) -> String {
         instance.to_ascii_lowercase(),
         user.to_ascii_lowercase()
     );
+    let normalized_instance_root = instance_root.trim().to_owned();
 
     let Ok(mut state) = store().lock() else {
         return id;
     };
-    if !state.tabs.iter().any(|tab| tab.id == id) {
+    if let Some(existing) = state.tabs.iter_mut().find(|tab| tab.id == id) {
+        existing.instance_root = if normalized_instance_root.is_empty() {
+            None
+        } else {
+            Some(normalized_instance_root.clone())
+        };
+        existing.missing_since = None;
+    } else {
         state.tabs.push(ConsoleTab {
             id: id.clone(),
             label,
+            instance_root: if normalized_instance_root.is_empty() {
+                None
+            } else {
+                Some(normalized_instance_root)
+            },
+            missing_since: None,
             lines: VecDeque::new(),
         });
     }
     state.active_tab_id = id.clone();
     id
+}
+
+pub fn prune_instance_tabs(active_instance_roots: &[String]) {
+    let Ok(mut state) = store().lock() else {
+        return;
+    };
+    let now = Instant::now();
+    let active_roots: HashSet<&str> = active_instance_roots.iter().map(String::as_str).collect();
+
+    for tab in &mut state.tabs {
+        let Some(root) = tab.instance_root.as_deref() else {
+            continue;
+        };
+        if active_roots.contains(root) {
+            tab.missing_since = None;
+        } else if tab.missing_since.is_none() {
+            tab.missing_since = Some(now);
+        }
+    }
+
+    state.tabs.retain(|tab| {
+        let Some(_) = tab.instance_root.as_deref() else {
+            return true;
+        };
+        tab.missing_since.is_none_or(|missing_since| {
+            now.duration_since(missing_since) < INSTANCE_TAB_PRUNE_GRACE
+        })
+    });
+
+    if state.tabs.is_empty() {
+        state.tabs.push(ConsoleTab {
+            id: DEFAULT_TAB_ID.to_owned(),
+            label: DEFAULT_TAB_LABEL.to_owned(),
+            instance_root: None,
+            missing_since: None,
+            lines: VecDeque::new(),
+        });
+    }
+
+    if !state.tabs.iter().any(|tab| tab.id == state.active_tab_id) {
+        state.active_tab_id = DEFAULT_TAB_ID.to_owned();
+    }
 }
 
 pub fn set_active_tab(tab_id: &str) {

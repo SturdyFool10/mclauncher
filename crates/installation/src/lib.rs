@@ -29,6 +29,8 @@ const CACHE_VERSION_CATALOG_ALL_FILE: &str = "version_catalog_with_snapshots.jso
 const CACHE_LOADER_VERSIONS_DIR_NAME: &str = "loader_versions";
 const CACHE_DIR_NAME: &str = "cache";
 const VERSION_CATALOG_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const HTTP_RETRY_ATTEMPTS: u32 = 4;
+const HTTP_RETRY_BASE_DELAY_MS: u64 = 350;
 const OPENJDK_USER_AGENT: &str =
     "VertexLauncher-JavaProvisioner/0.1 (+https://github.com/SturdyFool10/vertexlauncher)";
 
@@ -567,6 +569,14 @@ pub fn ensure_game_files(
     if game_version.is_empty() {
         return Err(InstallationError::UnknownMinecraftVersion(String::new()));
     }
+    tracing::info!(
+        target: "vertexlauncher/installation/process",
+        instance_root = %instance_root.display(),
+        game_version = %game_version,
+        modloader = %modloader,
+        requested_modloader_version = %modloader_version.unwrap_or(""),
+        "Starting ensure_game_files."
+    );
 
     let versions_dir = instance_root.join("versions").join(game_version);
     fs_create_dir_all(&versions_dir)?;
@@ -590,10 +600,21 @@ pub fn ensure_game_files(
             eta_seconds: None,
         },
     );
+    tracing::info!(
+        target: "vertexlauncher/installation/process",
+        instance_root = %instance_root.display(),
+        game_version = %game_version,
+        "Prepared instance folders."
+    );
 
     let mut downloaded_files = 0;
 
     if !version_json_path.exists() || !client_jar_path.exists() {
+        tracing::info!(
+            target: "vertexlauncher/installation/process",
+            game_version = %game_version,
+            "Core version files missing; resolving metadata and scheduling core downloads."
+        );
         report_install_progress(
             progress.as_deref(),
             InstallProgress {
@@ -642,6 +663,12 @@ pub fn ensure_game_files(
             downloaded_files,
             progress.as_deref(),
         )?;
+        tracing::info!(
+            target: "vertexlauncher/installation/process",
+            game_version = %game_version,
+            downloaded_files,
+            "Core file download batch completed."
+        );
     }
     downloaded_files += download_version_dependencies(
         instance_root,
@@ -650,6 +677,12 @@ pub fn ensure_game_files(
         downloaded_files,
         progress.as_deref(),
     )?;
+    tracing::info!(
+        target: "vertexlauncher/installation/process",
+        game_version = %game_version,
+        downloaded_files,
+        "Version dependency download phase completed."
+    );
 
     report_install_progress(
         progress.as_deref(),
@@ -674,6 +707,14 @@ pub fn ensure_game_files(
         &mut downloaded_files,
         progress.as_deref(),
     )?;
+    tracing::info!(
+        target: "vertexlauncher/installation/process",
+        game_version = %game_version,
+        modloader = %modloader,
+        resolved_modloader_version = %resolved_modloader_version.as_deref().unwrap_or(""),
+        downloaded_files,
+        "Modloader installation phase completed."
+    );
     if let Some(loader_version) = resolved_modloader_version.as_deref() {
         let loader_kind = normalized_loader_label(modloader);
         if matches!(loader_kind, LoaderKind::Fabric | LoaderKind::Quilt) {
@@ -709,6 +750,14 @@ pub fn ensure_game_files(
             bytes_per_second: 0.0,
             eta_seconds: Some(0),
         },
+    );
+    tracing::info!(
+        target: "vertexlauncher/installation/process",
+        instance_root = %instance_root.display(),
+        game_version = %game_version,
+        final_downloaded_files = downloaded_files,
+        resolved_modloader_version = %resolved_modloader_version.as_deref().unwrap_or(""),
+        "ensure_game_files completed successfully."
     );
     Ok(GameSetupResult {
         version_json_path,
@@ -816,6 +865,7 @@ pub fn launch_instance(request: &LaunchRequest) -> Result<LaunchResult, Installa
         instance_root.as_path(),
         request.game_version.as_str(),
         profile_id.as_str(),
+        resolve_assets_index_name(&profile_chain, request.game_version.as_str()),
         classpath.as_str(),
         natives_dir.as_path(),
         request.player_name.as_deref(),
@@ -912,6 +962,14 @@ pub fn running_instance_for_account(account_key: &str) -> Option<String> {
     })
 }
 
+pub fn running_instance_roots() -> Vec<String> {
+    let Ok(mut processes) = process_registry().lock() else {
+        return Vec::new();
+    };
+    prune_finished_processes(&mut processes);
+    processes.keys().cloned().collect()
+}
+
 fn prune_finished_processes(processes: &mut HashMap<String, RunningInstanceProcess>) {
     processes.retain(|_, process| matches!(process.child.try_wait(), Ok(None)));
 }
@@ -1000,13 +1058,25 @@ fn resolve_launch_profile_path(
 ) -> Result<(String, PathBuf), InstallationError> {
     let versions_dir = instance_root.join("versions");
     let requested_loader = normalized_loader_label(modloader);
+    let allow_vanilla_fallback =
+        matches!(requested_loader, LoaderKind::Vanilla | LoaderKind::Custom);
+    tracing::info!(
+        target: "vertexlauncher/installation/launch_profile",
+        requested_modloader = %modloader,
+        requested_game_version = %game_version,
+        requested_modloader_version = %modloader_version.unwrap_or(""),
+        allow_vanilla_fallback,
+        "Resolving launch profile."
+    );
     let mut candidates = Vec::<(String, PathBuf)>::new();
 
-    let game_path = versions_dir
-        .join(game_version)
-        .join(format!("{game_version}.json"));
-    if game_path.exists() {
-        candidates.push((game_version.to_owned(), game_path));
+    if allow_vanilla_fallback {
+        let game_path = versions_dir
+            .join(game_version)
+            .join(format!("{game_version}.json"));
+        if game_path.exists() {
+            candidates.push((game_version.to_owned(), game_path));
+        }
     }
 
     if matches!(requested_loader, LoaderKind::Fabric | LoaderKind::Quilt)
@@ -1075,13 +1145,20 @@ fn resolve_launch_profile_path(
         }
     }
 
-    candidates
+    let resolved = candidates
         .into_iter()
         .find(|(_, path)| path.exists())
         .ok_or_else(|| InstallationError::LaunchProfileMissing {
             modloader: modloader.to_owned(),
             game_version: game_version.to_owned(),
-        })
+        })?;
+    tracing::info!(
+        target: "vertexlauncher/installation/launch_profile",
+        profile_id = %resolved.0,
+        profile_path = %resolved.1.display(),
+        "Resolved launch profile."
+    );
+    Ok(resolved)
 }
 
 fn load_profile_chain(
@@ -1146,15 +1223,17 @@ fn build_classpath(
             if !library_rules_allow(lib) {
                 continue;
             }
-            let Some(artifact_path) = lib
+            let artifact_path = lib
                 .get("downloads")
                 .and_then(|v| v.get("artifact"))
                 .and_then(|v| v.get("path"))
                 .and_then(serde_json::Value::as_str)
-            else {
+                .map(str::to_owned)
+                .or_else(|| resolve_library_maven_download(lib).map(|(_, path)| path));
+            let Some(artifact_path) = artifact_path else {
                 continue;
             };
-            let full = instance_root.join("libraries").join(artifact_path);
+            let full = instance_root.join("libraries").join(artifact_path.as_str());
             if full.exists() {
                 let key = full.display().to_string();
                 if seen.insert(key.clone()) {
@@ -1279,8 +1358,9 @@ fn extract_natives_archive(
 
 fn build_launch_context(
     instance_root: &Path,
-    game_version: &str,
+    _game_version: &str,
     profile_id: &str,
+    assets_index_name: &str,
     classpath: &str,
     natives_dir: &Path,
     player_name: Option<&str>,
@@ -1320,7 +1400,7 @@ fn build_launch_context(
         "assets_root".to_owned(),
         instance_root.join("assets").display().to_string(),
     );
-    substitutions.insert("assets_index_name".to_owned(), game_version.to_owned());
+    substitutions.insert("assets_index_name".to_owned(), assets_index_name.to_owned());
     substitutions.insert("auth_uuid".to_owned(), uuid.to_owned());
     substitutions.insert("auth_access_token".to_owned(), access_token.to_owned());
     substitutions.insert("clientid".to_owned(), "0".to_owned());
@@ -1329,6 +1409,10 @@ fn build_launch_context(
     substitutions.insert("version_type".to_owned(), "release".to_owned());
     substitutions.insert("user_properties".to_owned(), "{}".to_owned());
     substitutions.insert("classpath".to_owned(), classpath.to_owned());
+    substitutions.insert(
+        "library_directory".to_owned(),
+        instance_root.join("libraries").display().to_string(),
+    );
     substitutions.insert(
         "natives_directory".to_owned(),
         natives_dir.display().to_string(),
@@ -1346,6 +1430,21 @@ fn build_launch_context(
         substitutions,
         features,
     }
+}
+
+fn resolve_assets_index_name<'a>(chain: &'a [serde_json::Value], fallback: &'a str) -> &'a str {
+    for profile in chain.iter().rev() {
+        if let Some(id) = profile
+            .get("assetIndex")
+            .and_then(|value| value.get("id"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return id;
+        }
+    }
+    fallback
 }
 
 fn collect_jvm_arguments(chain: &[serde_json::Value], context: &LaunchContext) -> Vec<String> {
@@ -1657,29 +1756,86 @@ fn collect_library_download_tasks(
         return;
     };
     for library in libraries {
-        let Some(downloads) = library.get("downloads") else {
-            continue;
-        };
-        if let Some(artifact) = downloads.get("artifact") {
-            push_download_task_from_download_entry(
-                instance_root.join("libraries").as_path(),
-                artifact,
-                tasks,
-            );
-        }
-        if let Some(classifiers) = downloads
-            .get("classifiers")
-            .and_then(serde_json::Value::as_object)
-        {
-            for entry in classifiers.values() {
+        if let Some(downloads) = library.get("downloads") {
+            if let Some(artifact) = downloads.get("artifact") {
                 push_download_task_from_download_entry(
                     instance_root.join("libraries").as_path(),
-                    entry,
+                    artifact,
                     tasks,
                 );
             }
+            if let Some(classifiers) = downloads
+                .get("classifiers")
+                .and_then(serde_json::Value::as_object)
+            {
+                for entry in classifiers.values() {
+                    push_download_task_from_download_entry(
+                        instance_root.join("libraries").as_path(),
+                        entry,
+                        tasks,
+                    );
+                }
+            }
+        } else if let Some((url, relative_path)) = resolve_library_maven_download(library) {
+            let destination = instance_root.join("libraries").join(relative_path.as_str());
+            if !destination.exists() {
+                tasks.push(FileDownloadTask {
+                    url,
+                    destination,
+                    expected_size: library
+                        .get("size")
+                        .and_then(serde_json::Value::as_u64)
+                        .filter(|size| *size > 0),
+                });
+            }
         }
     }
+}
+
+fn resolve_library_maven_download(library: &serde_json::Value) -> Option<(String, String)> {
+    let name = library.get("name")?.as_str()?.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let mut parts = name.split(':');
+    let group = parts.next()?.trim();
+    let artifact = parts.next()?.trim();
+    let version_and_ext = parts.next()?.trim();
+    let classifier = parts
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if group.is_empty() || artifact.is_empty() || version_and_ext.is_empty() {
+        return None;
+    }
+
+    let (version, extension) = if let Some((version, ext)) = version_and_ext.split_once('@') {
+        (version.trim(), ext.trim())
+    } else {
+        (version_and_ext, "jar")
+    };
+    if version.is_empty() || extension.is_empty() {
+        return None;
+    }
+
+    let base_url = library
+        .get("url")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("https://libraries.minecraft.net/");
+    let group_path = group.replace('.', "/");
+    let file_name = if let Some(classifier) = classifier {
+        format!("{artifact}-{version}-{classifier}.{extension}")
+    } else {
+        format!("{artifact}-{version}.{extension}")
+    };
+    let relative_path = format!("{group_path}/{artifact}/{version}/{file_name}");
+    let url = format!(
+        "{}{relative_path}",
+        base_url.trim_end_matches('/').to_owned() + "/"
+    );
+    Some((url, relative_path))
 }
 
 fn collect_asset_index_download_task(
@@ -2025,6 +2181,8 @@ fn download_files_concurrent(
     let worker_count = policy.max_concurrent_downloads.clamp(1, 64) as usize;
     let size_probe_workers = worker_count.min(8).max(1);
     let prefetched_total_bytes = prefetch_batch_total_bytes(&mut tasks, size_probe_workers);
+    // Prioritize larger files so long-running transfers start earlier.
+    tasks.sort_by_key(|task| std::cmp::Reverse(task.expected_size.unwrap_or(0)));
     tracing::info!(
         target: "vertexlauncher/installation/downloads",
         "Starting {:?} batch: {} file(s), prefetched_total_bytes={}, max_concurrent_downloads={}, speed_limit_bps={:?}.",
@@ -2115,27 +2273,7 @@ fn download_to_file(
         task.destination.display()
     );
 
-    let response = match http_agent()
-        .get(task.url.as_str())
-        .set("User-Agent", DEFAULT_USER_AGENT)
-        .call()
-    {
-        Ok(ok) => ok,
-        Err(ureq::Error::Status(status, response)) => {
-            let body = response.into_string().unwrap_or_default();
-            return Err(InstallationError::HttpStatus {
-                url: task.url,
-                status,
-                body,
-            });
-        }
-        Err(ureq::Error::Transport(transport)) => {
-            return Err(InstallationError::Transport {
-                url: task.url,
-                message: transport.to_string(),
-            });
-        }
-    };
+    let response = call_get_with_retry(task.url.as_str(), DEFAULT_USER_AGENT)?;
     if task.expected_size.is_none()
         && let Some(content_length) = response
             .header("Content-Length")
@@ -2189,6 +2327,13 @@ fn install_selected_modloader(
     progress: Option<&InstallProgressSink>,
 ) -> Result<Option<String>, InstallationError> {
     let loader_kind = normalized_loader_label(modloader);
+    tracing::info!(
+        target: "vertexlauncher/installation/modloader",
+        requested_modloader = %modloader,
+        requested_game_version = %game_version,
+        requested_modloader_version = %modloader_version.unwrap_or(""),
+        "Selecting modloader installation strategy."
+    );
     match loader_kind {
         LoaderKind::Vanilla | LoaderKind::Custom => Ok(None),
         LoaderKind::Fabric | LoaderKind::Quilt => {
@@ -2197,7 +2342,8 @@ fn install_selected_modloader(
             } else {
                 "Quilt"
             };
-            let resolved = resolve_loader_version(loader_label, game_version, modloader_version)?;
+            let resolved =
+                resolve_loader_version(loader_kind, loader_label, game_version, modloader_version)?;
             *downloaded_files += install_fabric_or_quilt_profile(
                 instance_root,
                 game_version,
@@ -2210,7 +2356,8 @@ fn install_selected_modloader(
             Ok(Some(resolved))
         }
         LoaderKind::Forge => {
-            let resolved = resolve_loader_version("Forge", game_version, modloader_version)?;
+            let resolved =
+                resolve_loader_version(loader_kind, "Forge", game_version, modloader_version)?;
             *downloaded_files += install_forge_installer(
                 instance_root,
                 game_version,
@@ -2223,7 +2370,8 @@ fn install_selected_modloader(
             Ok(Some(resolved))
         }
         LoaderKind::NeoForge => {
-            let resolved = resolve_loader_version("NeoForge", game_version, modloader_version)?;
+            let resolved =
+                resolve_loader_version(loader_kind, "NeoForge", game_version, modloader_version)?;
             *downloaded_files += install_neoforge_installer(
                 instance_root,
                 game_version,
@@ -2239,21 +2387,63 @@ fn install_selected_modloader(
 }
 
 fn resolve_loader_version(
+    _loader_kind: LoaderKind,
     loader_label: &str,
     game_version: &str,
     requested: Option<&str>,
 ) -> Result<String, InstallationError> {
-    if let Some(value) = requested.map(str::trim).filter(|value| !value.is_empty()) {
+    let versions = fetch_loader_versions_for_game(loader_label, game_version, false)?;
+    if let Some(value) = requested.map(str::trim).filter(|value| !value.is_empty())
+        && !is_latest_loader_version_alias(value)
+    {
+        let supported = versions.iter().any(|candidate| candidate == value);
+        if !supported {
+            tracing::warn!(
+                target: "vertexlauncher/installation/modloader",
+                loader = %loader_label,
+                game_version = %game_version,
+                requested = %value,
+                supported_versions = ?versions,
+                "Requested modloader version is not compatible with selected Minecraft version."
+            );
+            return Err(InstallationError::MissingModloaderVersion {
+                loader: loader_label.to_owned(),
+                game_version: game_version.to_owned(),
+            });
+        }
+        tracing::info!(
+            target: "vertexlauncher/installation/modloader",
+            loader = %loader_label,
+            game_version = %game_version,
+            requested = %value,
+            "Using explicitly requested compatible modloader version."
+        );
         return Ok(value.to_owned());
     }
-    let versions = fetch_loader_versions_for_game(loader_label, game_version, false)?;
-    versions
-        .first()
-        .cloned()
-        .ok_or_else(|| InstallationError::MissingModloaderVersion {
-            loader: loader_label.to_owned(),
-            game_version: game_version.to_owned(),
-        })
+    let resolved =
+        versions
+            .first()
+            .cloned()
+            .ok_or_else(|| InstallationError::MissingModloaderVersion {
+                loader: loader_label.to_owned(),
+                game_version: game_version.to_owned(),
+            })?;
+    tracing::info!(
+        target: "vertexlauncher/installation/modloader",
+        loader = %loader_label,
+        game_version = %game_version,
+        resolved = %resolved,
+        "Resolved latest compatible modloader version."
+    );
+    Ok(resolved)
+}
+
+fn is_latest_loader_version_alias(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "latest" | "latest available" | "use latest version" | "auto" | "default"
+    )
 }
 
 fn install_fabric_or_quilt_profile(
@@ -2422,6 +2612,10 @@ fn run_modloader_installer_and_verify(
                 versions_dir: instance_root.join("versions").display().to_string(),
             },
         )?;
+    let installer_path = match fs_canonicalize(installer_path.as_path()) {
+        Ok(path) => path,
+        Err(_) => installer_path,
+    };
     ensure_launcher_profiles(instance_root)?;
     let installer_target =
         fs_canonicalize(instance_root).unwrap_or_else(|_| instance_root.to_path_buf());
@@ -3391,11 +3585,7 @@ fn get_json_with_user_agent<T: DeserializeOwned>(
     url: &str,
     user_agent: &str,
 ) -> Result<T, InstallationError> {
-    let response = http_agent()
-        .get(url)
-        .set("User-Agent", user_agent)
-        .call()
-        .map_err(map_ureq_error)?;
+    let response = call_get_with_retry(url, user_agent)?;
     let raw = response.into_string().map_err(InstallationError::Io)?;
     Ok(serde_json::from_str(&raw)?)
 }
@@ -3412,29 +3602,73 @@ fn http_agent() -> &'static ureq::Agent {
 }
 
 fn get_text(url: &str) -> Result<String, InstallationError> {
-    let response = match http_agent()
-        .get(url)
-        .set("User-Agent", DEFAULT_USER_AGENT)
-        .call()
-    {
-        Ok(ok) => ok,
-        Err(ureq::Error::Status(status, response)) => {
-            let body = response.into_string().unwrap_or_default();
-            return Err(InstallationError::HttpStatus {
-                url: url.to_owned(),
-                status,
-                body,
-            });
-        }
-        Err(ureq::Error::Transport(transport)) => {
-            return Err(InstallationError::Transport {
-                url: url.to_owned(),
-                message: transport.to_string(),
-            });
-        }
-    };
+    let response = call_get_with_retry(url, DEFAULT_USER_AGENT)?;
 
     response.into_string().map_err(InstallationError::Io)
+}
+
+fn call_get_with_retry(url: &str, user_agent: &str) -> Result<ureq::Response, InstallationError> {
+    let mut last_err = None;
+    for attempt in 1..=HTTP_RETRY_ATTEMPTS {
+        match http_agent().get(url).set("User-Agent", user_agent).call() {
+            Ok(response) => return Ok(response),
+            Err(ureq::Error::Status(status, response)) => {
+                let body = response.into_string().unwrap_or_default();
+                let err = InstallationError::HttpStatus {
+                    url: url.to_owned(),
+                    status,
+                    body,
+                };
+                let retryable = should_retry_http_status(status);
+                if !retryable || attempt >= HTTP_RETRY_ATTEMPTS {
+                    return Err(err);
+                }
+                last_err = Some(err);
+            }
+            Err(ureq::Error::Transport(transport)) => {
+                let err = InstallationError::Transport {
+                    url: url.to_owned(),
+                    message: transport.to_string(),
+                };
+                if attempt >= HTTP_RETRY_ATTEMPTS {
+                    return Err(err);
+                }
+                last_err = Some(err);
+            }
+        }
+
+        let delay = retry_delay_for_attempt(attempt);
+        tracing::warn!(
+            target: "vertexlauncher/installation/downloads",
+            "Request retry {}/{} for {} after {:?}: {}",
+            attempt,
+            HTTP_RETRY_ATTEMPTS,
+            url,
+            delay,
+            last_err
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "request failed".to_owned())
+        );
+        thread::sleep(delay);
+    }
+    Err(last_err.unwrap_or_else(|| InstallationError::Transport {
+        url: url.to_owned(),
+        message: "request failed without detailed error".to_owned(),
+    }))
+}
+
+fn should_retry_http_status(status: u16) -> bool {
+    matches!(status, 408 | 425 | 429) || (500..=599).contains(&status)
+}
+
+fn retry_delay_for_attempt(attempt: u32) -> Duration {
+    let exponent = attempt.saturating_sub(1).min(5);
+    let multiplier = 1u64 << exponent;
+    let millis = HTTP_RETRY_BASE_DELAY_MS
+        .saturating_mul(multiplier)
+        .min(5_000);
+    Duration::from_millis(millis)
 }
 
 fn map_ureq_error(error: ureq::Error) -> InstallationError {

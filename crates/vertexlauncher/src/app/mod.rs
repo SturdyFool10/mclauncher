@@ -6,7 +6,7 @@ use eframe::{self, egui};
 use egui::CentralPanel;
 use installation::{
     DownloadPolicy, InstallProgress, InstallProgressCallback, InstallStage, ensure_game_files,
-    ensure_openjdk_runtime,
+    ensure_openjdk_runtime, running_instance_roots,
 };
 use instances::{
     InstanceRecord, InstanceStore, create_instance, instance_root_path, load_store,
@@ -164,6 +164,7 @@ impl eframe::App for VertexApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.text_ui.begin_frame(ctx);
         self.auth.poll();
+        console::prune_instance_tabs(&running_instance_roots());
         apply_install_activity_os_feedback(ctx, frame);
         if self.auth.should_request_repaint() {
             ctx.request_repaint_after(REPAINT_INTERVAL);
