@@ -78,3 +78,14 @@ sudo apt-get install -y --no-install-recommends \
 If your distro does not provide `4.1` packages, use:
 - `libwebkit2gtk-4.0-dev`
 - `libjavascriptcoregtk-4.0-dev`
+
+On Wayland, taskbar/dock icons are resolved via desktop app ID. This app uses `vertexlauncher` as its app ID.
+To avoid a generic Wayland icon, install a matching desktop entry + icon name:
+
+```sh
+mkdir -p ~/.local/share/applications ~/.local/share/icons/hicolor/256x256/apps
+cp packaging/linux/vertexlauncher.desktop ~/.local/share/applications/
+cp crates/launcher_ui/src/assets/vertex.webp ~/.local/share/icons/hicolor/256x256/apps/vertexlauncher.webp
+update-desktop-database ~/.local/share/applications 2>/dev/null || true
+gtk-update-icon-cache ~/.local/share/icons/hicolor 2>/dev/null || true
+```

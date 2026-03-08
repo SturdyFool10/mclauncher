@@ -3,6 +3,7 @@ pub(super) fn run_webview_window(
     auth_request_uri: &str,
     redirect_uri: &str,
 ) -> Result<String, String> {
+    use crate::app::app_icon;
     use std::sync::{Arc, Mutex};
 
     use tao::dpi::LogicalSize;
@@ -28,9 +29,14 @@ pub(super) fn run_webview_window(
     let result_for_nav = Arc::clone(&result);
     let redirect_prefix = redirect_uri.to_owned();
 
-    let window = WindowBuilder::new()
+    let mut window_builder = WindowBuilder::new()
         .with_title("Microsoft Sign-In")
-        .with_inner_size(LogicalSize::new(980.0, 760.0))
+        .with_inner_size(LogicalSize::new(980.0, 760.0));
+    if let Some(icon) = app_icon::tao_icon() {
+        window_builder = window_builder.with_window_icon(Some(icon));
+    }
+
+    let window = window_builder
         .build(&event_loop)
         .map_err(|err| format!("Failed to create sign-in window: {err}"))?;
 

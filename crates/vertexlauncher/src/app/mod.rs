@@ -29,6 +29,7 @@ use self::auth_state::{AuthState, REPAINT_INTERVAL};
 use self::config_format_modal::ModalAction;
 use self::fonts::FontController;
 
+mod app_icon;
 mod auth_state;
 mod config_format_modal;
 mod create_instance_modal;
@@ -683,6 +684,8 @@ pub fn run() -> eframe::Result<()> {
     let log_path = init_tracing();
     tracing::info!(target: "vertexlauncher/app/startup", "Launcher started. Log file: {}", log_path.display());
     launcher_runtime::init();
+    #[cfg(target_os = "macos")]
+    app_icon::apply_macos_dock_icon();
     let config_state = load_config();
     let startup_config = match &config_state {
         LoadConfigResult::Loaded(config) => config.clone(),

@@ -2,6 +2,8 @@ use config::Config;
 use eframe::{self, egui};
 use std::sync::Arc;
 
+use super::app_icon;
+
 pub fn build(startup_config: &Config) -> eframe::NativeOptions {
     let startup_power_preference = if startup_config.low_power_gpu_preferred() {
         eframe::egui_wgpu::wgpu::PowerPreference::LowPower
@@ -12,11 +14,13 @@ pub fn build(startup_config: &Config) -> eframe::NativeOptions {
     eframe::NativeOptions {
         viewport: egui::ViewportBuilder {
             title: Some("Vertex Launcher".into()),
+            app_id: Some("vertexlauncher".into()),
             inner_size: Some(egui::vec2(1280.0, 800.0)),
             min_inner_size: Some(egui::vec2(900.0, 460.0)),
             resizable: Some(true),
             decorations: Some(false),
             transparent: Some(startup_config.window_blur_enabled()),
+            icon: app_icon::egui_icon(),
             ..Default::default()
         },
         renderer: eframe::Renderer::Wgpu,
