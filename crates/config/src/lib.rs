@@ -15,6 +15,8 @@ pub const DEFAULT_MINECRAFT_INSTALLATIONS_ROOT: &str = "instances";
 pub const DOWNLOAD_CONCURRENCY_MIN: u32 = 1;
 pub const DOWNLOAD_CONCURRENCY_MAX: u32 = 128;
 pub const DEFAULT_DOWNLOAD_CONCURRENCY: u32 = 8;
+pub const FRAME_LIMIT_FPS_MIN: i32 = 30;
+pub const FRAME_LIMIT_FPS_MAX: i32 = 240;
 
 const MAPLE_FONT_FAMILIES: &[&str] = &["Maple Mono NF", "Maple Mono", "Maple Mono Normal"];
 const JETBRAINS_FONT_FAMILIES: &[&str] = &[
@@ -74,6 +76,33 @@ const UI_FONT_OPTION_LABELS: &[&str] = &[
     "Cascadia Code",
     "Iosevka",
 ];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkinPreviewAaMode {
+    Off,
+    Msaa,
+    Fxaa,
+    Taa,
+}
+
+impl SkinPreviewAaMode {
+    pub const ALL: [SkinPreviewAaMode; 4] = [
+        SkinPreviewAaMode::Msaa,
+        SkinPreviewAaMode::Fxaa,
+        SkinPreviewAaMode::Taa,
+        SkinPreviewAaMode::Off,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            SkinPreviewAaMode::Off => "Off",
+            SkinPreviewAaMode::Msaa => "MSAA (GPU)",
+            SkinPreviewAaMode::Fxaa => "FXAA (Post)",
+            SkinPreviewAaMode::Taa => "TAA (Temporal)",
+        }
+    }
+}
 
 /// File format choice for config creation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -208,6 +237,7 @@ pub enum ToggleSettingId {
     OpenTypeFeaturesEnabled,
     SnapshotsAndBetasEnabled,
     ForceJava21Minimum,
+    FrameLimiterEnabled,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -254,6 +284,13 @@ impl ToggleSettingId {
                 label: "Force Java 21 Minimum",
                 info_tooltip: Some(
                     "When enabled, versions requiring Java 8/16/17 use Java 21 instead. Higher Java requirements are unchanged.",
+                ),
+            },
+            ToggleSettingId::FrameLimiterEnabled => ToggleSettingSpec {
+                id: ToggleSettingId::FrameLimiterEnabled,
+                label: "Enable Frame Limiter",
+                info_tooltip: Some(
+                    "Caps launcher rendering FPS to reduce power usage and heat. Applied immediately.",
                 ),
             },
         }
@@ -323,6 +360,7 @@ impl FloatSettingId {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum IntSettingId {
     UiFontWeight,
+    FrameLimitFps,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -346,6 +384,14 @@ impl IntSettingId {
                 min: UI_FONT_WEIGHT_MIN,
                 max: UI_FONT_WEIGHT_MAX,
                 step: UI_FONT_WEIGHT_STEP,
+            },
+            IntSettingId::FrameLimitFps => IntSettingSpec {
+                id: IntSettingId::FrameLimitFps,
+                label: "Frame Limit FPS",
+                info_tooltip: Some("Maximum UI frame rate when frame limiter is enabled."),
+                min: FRAME_LIMIT_FPS_MIN,
+                max: FRAME_LIMIT_FPS_MAX,
+                step: 1,
             },
         }
     }
@@ -390,6 +436,9 @@ pub struct Config {
     open_type_features_enabled: bool,
     open_type_features_to_enable: String,
     ui_font_family: UiFontFamily,
+    skin_preview_aa_mode: SkinPreviewAaMode,
+    frame_limiter_enabled: bool,
+    frame_limit_fps: i32,
     ui_font_size: f32,
     ui_font_weight: i32,
     include_snapshots_and_betas: bool,
@@ -416,6 +465,31 @@ impl Config {
     /// Returns currently selected UI font family.
     pub fn ui_font_family(&self) -> UiFontFamily {
         self.ui_font_family
+    }
+
+    /// Returns configured skin preview anti-aliasing mode.
+    pub fn skin_preview_aa_mode(&self) -> SkinPreviewAaMode {
+        self.skin_preview_aa_mode
+    }
+
+    /// Sets skin preview anti-aliasing mode.
+    pub fn set_skin_preview_aa_mode(&mut self, mode: SkinPreviewAaMode) {
+        self.skin_preview_aa_mode = mode;
+    }
+
+    /// Returns whether frame limiter is enabled.
+    pub fn frame_limiter_enabled(&self) -> bool {
+        self.frame_limiter_enabled
+    }
+
+    /// Returns configured FPS cap used by frame limiter.
+    pub fn frame_limit_fps(&self) -> i32 {
+        self.frame_limit_fps
+    }
+
+    /// Sets configured FPS cap used by frame limiter.
+    pub fn set_frame_limit_fps(&mut self, fps: i32) {
+        self.frame_limit_fps = fps.clamp(FRAME_LIMIT_FPS_MIN, FRAME_LIMIT_FPS_MAX);
     }
 
     /// Returns whether platform blur effects are enabled.
@@ -565,6 +639,9 @@ impl Config {
         self.ui_font_weight = self
             .ui_font_weight
             .clamp(UI_FONT_WEIGHT_MIN, UI_FONT_WEIGHT_MAX);
+        self.frame_limit_fps = self
+            .frame_limit_fps
+            .clamp(FRAME_LIMIT_FPS_MIN, FRAME_LIMIT_FPS_MAX);
         self.default_instance_max_memory_mib = self.default_instance_max_memory_mib.clamp(
             INSTANCE_DEFAULT_MAX_MEMORY_MIB_MIN,
             INSTANCE_DEFAULT_MAX_MEMORY_MIB_MAX,
@@ -596,16 +673,19 @@ impl Config {
             open_type_features_enabled,
             open_type_features_to_enable: _,
             ui_font_family: _,
+            skin_preview_aa_mode: _,
             ui_font_size: _,
             ui_font_weight: _,
             include_snapshots_and_betas,
             force_java_21_minimum,
+            frame_limiter_enabled,
             default_instance_max_memory_mib: _,
             default_instance_cli_args: _,
             minecraft_installations_root: _,
             download_max_concurrent: _,
             download_speed_limit_enabled: _,
             download_speed_limit: _,
+            frame_limit_fps: _,
             java_8_jvm_path: _,
             java_16_jvm_path: _,
             java_17_jvm_path: _,
@@ -632,6 +712,10 @@ impl Config {
             ToggleSettingId::ForceJava21Minimum.spec(),
             force_java_21_minimum,
         );
+        visit(
+            ToggleSettingId::FrameLimiterEnabled.spec(),
+            frame_limiter_enabled,
+        );
     }
 
     /// Visits each dropdown setting with mutable access to its backing value.
@@ -647,10 +731,13 @@ impl Config {
             open_type_features_enabled: _,
             open_type_features_to_enable: _,
             ui_font_family,
+            skin_preview_aa_mode: _,
             ui_font_size: _,
             ui_font_weight: _,
             include_snapshots_and_betas: _,
             force_java_21_minimum: _,
+            frame_limiter_enabled: _,
+            frame_limit_fps: _,
             default_instance_max_memory_mib: _,
             default_instance_cli_args: _,
             minecraft_installations_root: _,
@@ -676,10 +763,13 @@ impl Config {
             open_type_features_enabled: _,
             open_type_features_to_enable: _,
             ui_font_family: _,
+            skin_preview_aa_mode: _,
             ui_font_size,
             ui_font_weight: _,
             include_snapshots_and_betas: _,
             force_java_21_minimum: _,
+            frame_limiter_enabled: _,
+            frame_limit_fps: _,
             default_instance_max_memory_mib: _,
             default_instance_cli_args: _,
             minecraft_installations_root: _,
@@ -705,8 +795,11 @@ impl Config {
             open_type_features_enabled: _,
             open_type_features_to_enable: _,
             ui_font_family: _,
+            skin_preview_aa_mode: _,
             ui_font_size: _,
             ui_font_weight,
+            frame_limiter_enabled: _,
+            frame_limit_fps,
             include_snapshots_and_betas: _,
             force_java_21_minimum: _,
             default_instance_max_memory_mib: _,
@@ -722,6 +815,7 @@ impl Config {
         } = self;
 
         visit(IntSettingId::UiFontWeight.spec(), ui_font_weight);
+        visit(IntSettingId::FrameLimitFps.spec(), frame_limit_fps);
     }
 
     /// Visits each text setting with mutable access to its backing value.
@@ -734,8 +828,11 @@ impl Config {
             open_type_features_enabled: _,
             open_type_features_to_enable,
             ui_font_family: _,
+            skin_preview_aa_mode: _,
             ui_font_size: _,
             ui_font_weight: _,
+            frame_limiter_enabled: _,
+            frame_limit_fps: _,
             include_snapshots_and_betas: _,
             force_java_21_minimum: _,
             default_instance_max_memory_mib: _,
@@ -783,6 +880,9 @@ impl Default for Config {
             open_type_features_enabled: true,
             open_type_features_to_enable: String::new(),
             ui_font_family: UiFontFamily::MapleMonoNf,
+            skin_preview_aa_mode: SkinPreviewAaMode::Fxaa,
+            frame_limiter_enabled: false,
+            frame_limit_fps: 120,
             ui_font_size: 18.0,
             ui_font_weight: 400,
             include_snapshots_and_betas: false,

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use config::{Config, UiFontFamily};
+use eframe::egui_wgpu::wgpu;
 use egui::Ui;
 use instances::InstanceStore;
 use textui::TextUi;
@@ -72,6 +73,8 @@ pub fn render(
     config: &mut Config,
     instances: &mut InstanceStore,
     account_avatars_by_key: &HashMap<String, Vec<u8>>,
+    wgpu_target_format: Option<wgpu::TextureFormat>,
+    skin_preview_msaa_samples: u32,
     available_ui_fonts: &[UiFontFamily],
     available_themes: &[Theme],
     text_ui: &mut TextUi,
@@ -99,7 +102,15 @@ pub fn render(
             }
         }
         AppScreen::Skins => {
-            skins::render(ui, text_ui, selected_instance_id, active_launch_auth);
+            skins::render(
+                ui,
+                text_ui,
+                selected_instance_id,
+                active_launch_auth,
+                wgpu_target_format,
+                skin_preview_msaa_samples,
+                config.skin_preview_aa_mode(),
+            );
             ScreenOutput::default()
         }
         AppScreen::Settings => {

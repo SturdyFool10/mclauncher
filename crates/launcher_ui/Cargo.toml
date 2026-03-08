@@ -19,6 +19,7 @@ tracing.workspace = true
 auth.workspace = true
 image.workspace = true
 rfd = "0.15.4"
+bytemuck = { version = "1.24.0", features = ["derive"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_System_SystemInformation"] }

@@ -19,7 +19,7 @@ use std::fs::File;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use textui::TextUi;
 use tracing::Subscriber;
 use tracing_subscriber::layer::{Context as LayerContext, Layer};
@@ -54,6 +54,7 @@ struct VertexApp {
     create_instance_state: create_instance_modal::CreateInstanceState,
     auth: AuthState,
     text_ui: TextUi,
+    last_frame_end: Option<Instant>,
 }
 
 impl VertexApp {
@@ -107,6 +108,7 @@ impl VertexApp {
             create_instance_state: create_instance_modal::CreateInstanceState::default(),
             auth: AuthState::load(),
             text_ui,
+            last_frame_end: None,
         };
 
         app.refresh_instance_shortcuts();
@@ -164,10 +166,43 @@ impl VertexApp {
             "Refreshed sidebar instance shortcuts."
         );
     }
+
+    fn apply_frame_limiter(&mut self) {
+        if !self.config.frame_limiter_enabled() {
+            self.last_frame_end = None;
+            return;
+        }
+
+        let fps = self.config.frame_limit_fps().clamp(30, 240) as u32;
+        let frame_time = Duration::from_secs_f64(1.0 / fps as f64);
+        let now = Instant::now();
+        if let Some(last) = self.last_frame_end {
+            let elapsed = now.saturating_duration_since(last);
+            if elapsed < frame_time {
+                let remaining = frame_time - elapsed;
+                sleep_precise(remaining);
+            }
+        }
+        self.last_frame_end = Some(Instant::now());
+    }
+}
+
+fn sleep_precise(duration: Duration) {
+    let coarse = Duration::from_millis(1);
+    let tail = Duration::from_micros(250);
+    if duration > coarse + tail {
+        std::thread::sleep(duration - tail);
+    }
+    let deadline = Instant::now() + tail.min(duration);
+    while Instant::now() < deadline {
+        std::hint::spin_loop();
+        std::thread::yield_now();
+    }
 }
 
 impl eframe::App for VertexApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.apply_frame_limiter();
         self.text_ui.begin_frame(ctx);
         self.auth.poll();
         console::prune_instance_tabs(&running_instance_roots());
@@ -278,6 +313,8 @@ impl eframe::App for VertexApp {
         }
 
         let mut screen_output = screens::ScreenOutput::default();
+        let wgpu_target_format = frame.wgpu_render_state().map(|state| state.target_format);
+        let skin_preview_msaa_samples = 4;
         CentralPanel::default()
             .frame(
                 egui::Frame::new()
@@ -300,6 +337,8 @@ impl eframe::App for VertexApp {
                     &mut self.config,
                     &mut self.instance_store,
                     &account_avatars_by_key,
+                    wgpu_target_format,
+                    skin_preview_msaa_samples,
                     self.fonts.available_ui_fonts(),
                     self.theme_catalog.themes(),
                     &mut self.text_ui,

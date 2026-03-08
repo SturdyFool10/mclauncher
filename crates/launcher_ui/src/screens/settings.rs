@@ -1,7 +1,7 @@
 use config::{
     Config, DOWNLOAD_CONCURRENCY_MAX, DOWNLOAD_CONCURRENCY_MIN, DropdownSettingId,
-    INSTANCE_DEFAULT_MAX_MEMORY_MIB_MIN, INSTANCE_DEFAULT_MAX_MEMORY_MIB_STEP, JavaRuntimeVersion,
-    UiFontFamily, parse_bitrate_to_bps,
+    INSTANCE_DEFAULT_MAX_MEMORY_MIB_MIN, INSTANCE_DEFAULT_MAX_MEMORY_MIB_STEP, IntSettingId,
+    JavaRuntimeVersion, SkinPreviewAaMode, UiFontFamily, parse_bitrate_to_bps,
 };
 use egui::Ui;
 use installation::purge_cache as purge_installation_cache;
@@ -39,12 +39,31 @@ fn render_settings_contents(
     ui.separator();
     ui.add_space(style::SPACE_LG);
 
+    let mut frame_limit_fps = config.frame_limit_fps();
     config.for_each_toggle_mut(|setting, value| {
         ui.push_id(setting.id, |ui| {
             settings_widgets::toggle_row(text_ui, ui, setting.label, setting.info_tooltip, value);
         });
+        if setting.id == config::ToggleSettingId::FrameLimiterEnabled && *value {
+            let spec = IntSettingId::FrameLimitFps.spec();
+            ui.push_id(spec.id, |ui| {
+                let response = settings_widgets::int_stepper_row(
+                    text_ui,
+                    ui,
+                    spec.id,
+                    spec.label,
+                    spec.info_tooltip,
+                    &mut frame_limit_fps,
+                    spec.min,
+                    spec.max,
+                    spec.step,
+                );
+                let _ = response.changed();
+            });
+        }
         ui.add_space(style::SPACE_MD);
     });
+    config.set_frame_limit_fps(frame_limit_fps);
 
     if !available_themes.is_empty() {
         let mut selected_theme_index = available_themes
@@ -67,6 +86,34 @@ fn render_settings_contents(
         if response.changed() {
             if let Some(theme) = available_themes.get(selected_theme_index) {
                 config.set_theme_id(theme.id.clone());
+            }
+        }
+        ui.add_space(style::SPACE_MD);
+    }
+
+    {
+        let mut selected = SkinPreviewAaMode::ALL
+            .iter()
+            .position(|mode| *mode == config.skin_preview_aa_mode())
+            .unwrap_or(0);
+        let labels: Vec<&str> = SkinPreviewAaMode::ALL
+            .iter()
+            .map(|mode| mode.label())
+            .collect();
+        let response = settings_widgets::dropdown_row(
+            text_ui,
+            ui,
+            "skins_preview_aa_mode",
+            "Skin Preview Anti-Aliasing",
+            Some(
+                "MSAA uses GPU hardware; FXAA and TAA are post-process modes. Changes apply immediately.",
+            ),
+            &mut selected,
+            &labels,
+        );
+        if response.changed() {
+            if let Some(next) = SkinPreviewAaMode::ALL.get(selected).copied() {
+                config.set_skin_preview_aa_mode(next);
             }
         }
         ui.add_space(style::SPACE_MD);
@@ -131,6 +178,9 @@ fn render_settings_contents(
     });
 
     config.for_each_int_mut(|setting, value| {
+        if setting.id == IntSettingId::FrameLimitFps {
+            return;
+        }
         ui.push_id(setting.id, |ui| {
             settings_widgets::int_stepper_row(
                 text_ui,

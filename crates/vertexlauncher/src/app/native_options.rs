@@ -23,7 +23,7 @@ pub fn build(startup_config: &Config) -> eframe::NativeOptions {
         hardware_acceleration: eframe::HardwareAcceleration::Required,
         vsync: false,
         multisampling: 4,
-        depth_buffer: 0,
+        depth_buffer: 32,
         stencil_buffer: 0,
         dithering: false,
         centered: false,

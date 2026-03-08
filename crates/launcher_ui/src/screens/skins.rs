@@ -6,6 +6,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use auth::{CachedAccount, MinecraftProfileState, MinecraftSkinVariant};
+use bytemuck::{Pod, Zeroable};
+use config::SkinPreviewAaMode;
+use eframe::egui_wgpu::{self, wgpu};
 use egui::{Color32, CornerRadius, Pos2, Rect, Sense, Stroke, TextureHandle, TextureOptions, Ui};
 use image::RgbaImage;
 use textui::{ButtonOptions, TextUi};
@@ -21,15 +24,21 @@ const CAMERA_INERTIA_VELOCITY_BLEND: f32 = 0.24;
 const CAMERA_INERTIA_MAX_RAD_PER_SEC: f32 = 2.2;
 const CAMERA_INERTIA_FRICTION_PER_SEC: f32 = 0.85;
 const CAMERA_INERTIA_STOP_THRESHOLD_RAD_PER_SEC: f32 = 0.015;
-const UV_EDGE_INSET_TEXELS: f32 = 0.01;
+const UV_EDGE_INSET_BASE_TEXELS: f32 = 0.08;
+const UV_EDGE_INSET_OVERLAY_TEXELS: f32 = 0.38;
 const CAPE_TILE_WIDTH_MIN: f32 = 132.0;
 const CAPE_TILE_HEIGHT: f32 = 186.0;
+const SKIN_PREVIEW_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+const SKIN_PREVIEW_NEAR: f32 = 1.5;
 
 pub fn render(
     ui: &mut Ui,
     text_ui: &mut TextUi,
     _selected_instance_id: Option<&str>,
     active_launch_auth: Option<&LaunchAuthContext>,
+    wgpu_target_format: Option<wgpu::TextureFormat>,
+    skin_preview_msaa_samples: u32,
+    preview_aa_mode: SkinPreviewAaMode,
 ) {
     let state_id = ui.make_persistent_id("skins_screen_state");
     let mut state = ui
@@ -38,6 +47,14 @@ pub fn render(
         .unwrap_or_default();
 
     state.sync_active_account(active_launch_auth);
+    state.wgpu_target_format = wgpu_target_format;
+    state.preview_msaa_samples = skin_preview_msaa_samples.max(1);
+    state.preview_aa_mode = preview_aa_mode;
+    if state.last_preview_aa_mode != state.preview_aa_mode {
+        state.preview_texture = None;
+        state.preview_history = None;
+        state.last_preview_aa_mode = state.preview_aa_mode;
+    }
     state.poll_worker(ui.ctx());
     state.ensure_skin_texture(ui.ctx());
     state.ensure_cape_texture(ui.ctx());
@@ -249,26 +266,38 @@ fn render_preview(ui: &mut Ui, text_ui: &mut TextUi, state: &mut SkinManagerStat
         + state.camera_yaw_offset;
     let walk = (now as f32 * 3.3).sin();
 
-    let skin_image = state.skin_sample.as_ref();
-    let cape_image = state.cape_sample.as_ref();
+    let skin_texture = state.skin_texture.as_ref();
+    let cape_texture = state.cape_texture.as_ref();
+    let skin_sample = state.skin_sample.as_ref().cloned();
+    let cape_sample = state.cape_sample.as_ref().cloned();
     let cape_uv = state.cape_uv;
     let variant = state.pending_variant;
     let show_elytra = state.show_elytra;
+    let wgpu_target_format = state.wgpu_target_format;
+    let preview_msaa_samples = state.preview_msaa_samples;
+    let preview_aa_mode = state.preview_aa_mode;
     let preview_texture = &mut state.preview_texture;
+    let preview_history = &mut state.preview_history;
 
-    if let Some(skin_image) = skin_image {
+    if let Some(skin_texture) = skin_texture {
         draw_character(
-            ui.ctx(),
+            ui,
             &painter,
             rect,
-            preview_texture,
-            skin_image,
-            cape_image,
+            skin_texture,
+            cape_texture,
+            skin_sample,
+            cape_sample,
             cape_uv,
             yaw,
             walk,
             variant,
             show_elytra,
+            wgpu_target_format,
+            preview_msaa_samples,
+            preview_aa_mode,
+            preview_texture,
+            preview_history,
         );
     } else {
         ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
@@ -322,17 +351,23 @@ fn paint_preview_background(painter: &egui::Painter, rect: Rect) {
 }
 
 fn draw_character(
-    ctx: &egui::Context,
+    ui: &Ui,
     painter: &egui::Painter,
     rect: Rect,
-    preview_texture: &mut Option<TextureHandle>,
-    skin_image: &RgbaImage,
-    cape_image: Option<&RgbaImage>,
+    skin_texture: &TextureHandle,
+    cape_texture: Option<&TextureHandle>,
+    skin_sample: Option<Arc<RgbaImage>>,
+    cape_sample: Option<Arc<RgbaImage>>,
     cape_uv: FaceUvs,
     yaw: f32,
     walk_phase: f32,
     variant: MinecraftSkinVariant,
     show_elytra: bool,
+    wgpu_target_format: Option<wgpu::TextureFormat>,
+    preview_msaa_samples: u32,
+    preview_aa_mode: SkinPreviewAaMode,
+    preview_texture: &mut Option<TextureHandle>,
+    preview_history: &mut Option<PreviewHistory>,
 ) {
     let arm_width = if variant == MinecraftSkinVariant::Slim {
         3.0
@@ -370,12 +405,12 @@ fn draw_character(
         back: uv_rect(32, 20, 8, 12),
     };
     let torso_overlay_uv = FaceUvs {
-        top: uv_rect(20, 32, 8, 4),
-        bottom: uv_rect(28, 32, 8, 4),
-        left: uv_rect(28, 36, 4, 12),
-        right: uv_rect(16, 36, 4, 12),
-        front: uv_rect(20, 36, 8, 12),
-        back: uv_rect(32, 36, 8, 12),
+        top: uv_rect_overlay(20, 32, 8, 4),
+        bottom: uv_rect_overlay(28, 32, 8, 4),
+        left: uv_rect_overlay(28, 36, 4, 12),
+        right: uv_rect_overlay(16, 36, 4, 12),
+        front: uv_rect_overlay(20, 36, 8, 12),
+        back: uv_rect_overlay(32, 36, 8, 12),
     };
 
     let head_uv = FaceUvs {
@@ -387,12 +422,12 @@ fn draw_character(
         back: uv_rect(24, 8, 8, 8),
     };
     let head_overlay_uv = FaceUvs {
-        top: uv_rect(40, 0, 8, 8),
-        bottom: uv_rect(48, 0, 8, 8),
-        left: uv_rect(48, 8, 8, 8),
-        right: uv_rect(32, 8, 8, 8),
-        front: uv_rect(40, 8, 8, 8),
-        back: uv_rect(56, 8, 8, 8),
+        top: uv_rect_overlay(40, 0, 8, 8),
+        bottom: uv_rect_overlay(48, 0, 8, 8),
+        left: uv_rect_overlay(48, 8, 8, 8),
+        right: uv_rect_overlay(32, 8, 8, 8),
+        front: uv_rect_overlay(40, 8, 8, 8),
+        back: uv_rect_overlay(56, 8, 8, 8),
     };
 
     let (right_arm_uv, left_arm_uv, right_arm_overlay_uv, left_arm_overlay_uv) =
@@ -415,20 +450,20 @@ fn draw_character(
                     back: uv_rect(43, 52, 3, 12),
                 },
                 FaceUvs {
-                    top: uv_rect(44, 32, 3, 4),
-                    bottom: uv_rect(47, 32, 3, 4),
-                    left: uv_rect(47, 36, 3, 12),
-                    right: uv_rect(40, 36, 3, 12),
-                    front: uv_rect(44, 36, 3, 12),
-                    back: uv_rect(51, 36, 3, 12),
+                    top: uv_rect_overlay(44, 32, 3, 4),
+                    bottom: uv_rect_overlay(47, 32, 3, 4),
+                    left: uv_rect_overlay(47, 36, 3, 12),
+                    right: uv_rect_overlay(40, 36, 3, 12),
+                    front: uv_rect_overlay(44, 36, 3, 12),
+                    back: uv_rect_overlay(51, 36, 3, 12),
                 },
                 FaceUvs {
-                    top: uv_rect(52, 48, 3, 4),
-                    bottom: uv_rect(55, 48, 3, 4),
-                    left: uv_rect(55, 52, 3, 12),
-                    right: uv_rect(48, 52, 3, 12),
-                    front: uv_rect(52, 52, 3, 12),
-                    back: uv_rect(59, 52, 3, 12),
+                    top: uv_rect_overlay(52, 48, 3, 4),
+                    bottom: uv_rect_overlay(55, 48, 3, 4),
+                    left: uv_rect_overlay(55, 52, 3, 12),
+                    right: uv_rect_overlay(48, 52, 3, 12),
+                    front: uv_rect_overlay(52, 52, 3, 12),
+                    back: uv_rect_overlay(59, 52, 3, 12),
                 },
             )
         } else {
@@ -450,20 +485,20 @@ fn draw_character(
                     back: uv_rect(44, 52, 4, 12),
                 },
                 FaceUvs {
-                    top: uv_rect(44, 32, 4, 4),
-                    bottom: uv_rect(48, 32, 4, 4),
-                    left: uv_rect(48, 36, 4, 12),
-                    right: uv_rect(40, 36, 4, 12),
-                    front: uv_rect(44, 36, 4, 12),
-                    back: uv_rect(52, 36, 4, 12),
+                    top: uv_rect_overlay(44, 32, 4, 4),
+                    bottom: uv_rect_overlay(48, 32, 4, 4),
+                    left: uv_rect_overlay(48, 36, 4, 12),
+                    right: uv_rect_overlay(40, 36, 4, 12),
+                    front: uv_rect_overlay(44, 36, 4, 12),
+                    back: uv_rect_overlay(52, 36, 4, 12),
                 },
                 FaceUvs {
-                    top: uv_rect(52, 48, 4, 4),
-                    bottom: uv_rect(56, 48, 4, 4),
-                    left: uv_rect(56, 52, 4, 12),
-                    right: uv_rect(48, 52, 4, 12),
-                    front: uv_rect(52, 52, 4, 12),
-                    back: uv_rect(60, 52, 4, 12),
+                    top: uv_rect_overlay(52, 48, 4, 4),
+                    bottom: uv_rect_overlay(56, 48, 4, 4),
+                    left: uv_rect_overlay(56, 52, 4, 12),
+                    right: uv_rect_overlay(48, 52, 4, 12),
+                    front: uv_rect_overlay(52, 52, 4, 12),
+                    back: uv_rect_overlay(60, 52, 4, 12),
                 },
             )
         };
@@ -485,12 +520,12 @@ fn draw_character(
         back: uv_rect(28, 52, 4, 12),
     };
     let leg_overlay_uv = FaceUvs {
-        top: uv_rect(4, 48, 4, 4),
-        bottom: uv_rect(8, 48, 4, 4),
-        left: uv_rect(8, 52, 4, 12),
-        right: uv_rect(0, 52, 4, 12),
-        front: uv_rect(4, 52, 4, 12),
-        back: uv_rect(12, 52, 4, 12),
+        top: uv_rect_overlay(4, 48, 4, 4),
+        bottom: uv_rect_overlay(8, 48, 4, 4),
+        left: uv_rect_overlay(8, 52, 4, 12),
+        right: uv_rect_overlay(0, 52, 4, 12),
+        front: uv_rect_overlay(4, 52, 4, 12),
+        back: uv_rect_overlay(12, 52, 4, 12),
     };
 
     add_cuboid_triangles(
@@ -669,7 +704,7 @@ fn draw_character(
 
     let mut scene_tris = base_tris;
     scene_tris.extend(overlay_tris);
-    if cape_image.is_some() {
+    if cape_texture.is_some() {
         add_cape_triangles(
             &mut scene_tris,
             TriangleTexture::Cape,
@@ -683,13 +718,19 @@ fn draw_character(
         );
     }
     render_depth_buffered_scene(
-        ctx,
+        ui,
         painter,
         rect,
-        preview_texture,
         &scene_tris,
-        skin_image,
-        cape_image,
+        skin_texture,
+        cape_texture,
+        skin_sample,
+        cape_sample,
+        wgpu_target_format,
+        preview_msaa_samples,
+        preview_aa_mode,
+        preview_texture,
+        preview_history,
     );
 
     if show_elytra {
@@ -727,13 +768,120 @@ fn add_cape_triangles(
 }
 
 fn render_depth_buffered_scene(
+    ui: &Ui,
+    painter: &egui::Painter,
+    rect: Rect,
+    triangles: &[RenderTriangle],
+    skin_texture: &TextureHandle,
+    cape_texture: Option<&TextureHandle>,
+    skin_sample: Option<Arc<RgbaImage>>,
+    cape_sample: Option<Arc<RgbaImage>>,
+    wgpu_target_format: Option<wgpu::TextureFormat>,
+    preview_msaa_samples: u32,
+    preview_aa_mode: SkinPreviewAaMode,
+    preview_texture: &mut Option<TextureHandle>,
+    preview_history: &mut Option<PreviewHistory>,
+) {
+    if matches!(
+        preview_aa_mode,
+        SkinPreviewAaMode::Fxaa | SkinPreviewAaMode::Taa
+    ) {
+        let Some(skin_sample) = skin_sample else {
+            paint_scene_fallback_mesh(painter, triangles, skin_texture, cape_texture);
+            return;
+        };
+        render_cpu_post_aa_scene(
+            ui.ctx(),
+            painter,
+            rect,
+            triangles,
+            &skin_sample,
+            cape_sample.as_deref(),
+            preview_aa_mode,
+            preview_texture,
+            preview_history,
+        );
+        return;
+    }
+
+    let Some(target_format) = wgpu_target_format else {
+        // WGPU target format can be absent on non-wgpu renderers.
+        paint_scene_fallback_mesh(painter, triangles, skin_texture, cape_texture);
+        return;
+    };
+    let Some(skin_sample) = skin_sample else {
+        paint_scene_fallback_mesh(painter, triangles, skin_texture, cape_texture);
+        return;
+    };
+
+    let callback = SkinPreviewWgpuCallback::from_scene(
+        rect,
+        triangles,
+        skin_sample,
+        cape_sample,
+        target_format,
+        if preview_aa_mode == SkinPreviewAaMode::Msaa {
+            preview_msaa_samples.max(1)
+        } else {
+            1
+        },
+    );
+    let callback_shape = egui_wgpu::Callback::new_paint_callback(rect, callback);
+    ui.painter().add(callback_shape);
+}
+
+fn paint_scene_fallback_mesh(
+    painter: &egui::Painter,
+    triangles: &[RenderTriangle],
+    skin_texture: &TextureHandle,
+    cape_texture: Option<&TextureHandle>,
+) {
+    for tri in triangles {
+        let texture_id = match tri.texture {
+            TriangleTexture::Skin => skin_texture.id(),
+            TriangleTexture::Cape => match cape_texture {
+                Some(texture) => texture.id(),
+                None => continue,
+            },
+        };
+        let mut mesh = egui::epaint::Mesh::with_texture(texture_id);
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: tri.pos[0],
+            uv: tri.uv[0],
+            color: tri.color,
+        });
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: tri.pos[1],
+            uv: tri.uv[1],
+            color: tri.color,
+        });
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: tri.pos[2],
+            uv: tri.uv[2],
+            color: tri.color,
+        });
+        mesh.indices.extend_from_slice(&[0, 1, 2]);
+        painter.add(egui::Shape::mesh(mesh));
+    }
+}
+
+#[derive(Clone)]
+struct PreviewHistory {
+    width: usize,
+    height: usize,
+    rgba: Vec<u8>,
+}
+
+fn render_cpu_post_aa_scene(
     ctx: &egui::Context,
     painter: &egui::Painter,
     rect: Rect,
-    preview_texture: &mut Option<TextureHandle>,
     triangles: &[RenderTriangle],
     skin_image: &RgbaImage,
     cape_image: Option<&RgbaImage>,
+    mode: SkinPreviewAaMode,
+    preview_texture: &mut Option<TextureHandle>,
+    preview_history: &mut Option<PreviewHistory>,
 ) {
     let width = rect.width().round().max(1.0) as usize;
     let height = rect.height().round().max(1.0) as usize;
@@ -751,17 +899,22 @@ fn render_depth_buffered_scene(
         rasterize_triangle_depth_tested(&mut color, &mut depth, width, height, rect, tri, texture);
     }
 
+    match mode {
+        SkinPreviewAaMode::Fxaa => apply_fxaa_rgba(&mut color, width, height),
+        SkinPreviewAaMode::Taa => apply_taa_rgba(&mut color, width, height, preview_history, 0.35),
+        _ => {}
+    }
+
     let color_image = egui::ColorImage::from_rgba_unmultiplied([width, height], &color);
     if let Some(texture) = preview_texture.as_mut() {
         texture.set(color_image, TextureOptions::LINEAR);
     } else {
         *preview_texture = Some(ctx.load_texture(
-            "skins/preview/rasterized-frame",
+            "skins/preview/post-aa-frame",
             color_image,
             TextureOptions::LINEAR,
         ));
     }
-
     if let Some(texture) = preview_texture.as_ref() {
         painter.image(texture.id(), rect, full_uv_rect(), Color32::WHITE);
     }
@@ -887,8 +1040,814 @@ fn blend_rgba_over(buffer: &mut [u8], base: usize, src: [u8; 4]) {
     buffer[base + 3] = (out_a * 255.0).round() as u8;
 }
 
+fn apply_taa_rgba(
+    color: &mut [u8],
+    width: usize,
+    height: usize,
+    history: &mut Option<PreviewHistory>,
+    alpha: f32,
+) {
+    if width == 0 || height == 0 {
+        return;
+    }
+    let alpha = alpha.clamp(0.0, 1.0);
+    let len = width * height * 4;
+    if history
+        .as_ref()
+        .is_none_or(|h| h.width != width || h.height != height || h.rgba.len() != len)
+    {
+        *history = Some(PreviewHistory {
+            width,
+            height,
+            rgba: color.to_vec(),
+        });
+        return;
+    }
+    let hist = history.as_mut().expect("history initialized");
+    for i in (0..len).step_by(4) {
+        let curr_a = color[i + 3] as f32 / 255.0;
+        if curr_a <= 0.001 {
+            continue;
+        }
+        for c in 0..3 {
+            let curr = color[i + c] as f32;
+            let prev = hist.rgba[i + c] as f32;
+            let mixed = curr * alpha + prev * (1.0 - alpha);
+            color[i + c] = mixed.round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    hist.rgba.copy_from_slice(color);
+}
+
+fn apply_fxaa_rgba(buffer: &mut [u8], width: usize, height: usize) {
+    if width < 3 || height < 3 {
+        return;
+    }
+
+    const EDGE_THRESHOLD: f32 = 1.0 / 8.0;
+    const EDGE_THRESHOLD_MIN: f32 = 1.0 / 16.0;
+    const FXAA_REDUCE_MIN: f32 = 1.0 / 128.0;
+    const FXAA_REDUCE_MUL: f32 = 1.0 / 8.0;
+    const FXAA_SPAN_MAX: f32 = 8.0;
+
+    let src = buffer.to_vec();
+    for y in 1..(height - 1) {
+        for x in 1..(width - 1) {
+            let luma_nw = luma_at(&src, width, x - 1, y - 1);
+            let luma_ne = luma_at(&src, width, x + 1, y - 1);
+            let luma_sw = luma_at(&src, width, x - 1, y + 1);
+            let luma_se = luma_at(&src, width, x + 1, y + 1);
+            let luma_m = luma_at(&src, width, x, y);
+
+            let luma_min = luma_m.min(luma_nw.min(luma_ne).min(luma_sw).min(luma_se));
+            let luma_max = luma_m.max(luma_nw.max(luma_ne).max(luma_sw).max(luma_se));
+            let luma_range = luma_max - luma_min;
+            let threshold = EDGE_THRESHOLD_MIN.max(luma_max * EDGE_THRESHOLD);
+            if luma_range < threshold {
+                continue;
+            }
+
+            let mut dir_x = -((luma_nw + luma_ne) - (luma_sw + luma_se));
+            let mut dir_y = (luma_nw + luma_sw) - (luma_ne + luma_se);
+
+            let dir_reduce = ((luma_nw + luma_ne + luma_sw + luma_se) * 0.25 * FXAA_REDUCE_MUL)
+                .max(FXAA_REDUCE_MIN);
+            let rcp_dir_min = 1.0 / (dir_x.abs().min(dir_y.abs()) + dir_reduce);
+            dir_x = (dir_x * rcp_dir_min).clamp(-FXAA_SPAN_MAX, FXAA_SPAN_MAX);
+            dir_y = (dir_y * rcp_dir_min).clamp(-FXAA_SPAN_MAX, FXAA_SPAN_MAX);
+
+            let px = x as f32;
+            let py = y as f32;
+            let rgb_a = {
+                let s0 = sample_rgb_linear(
+                    &src,
+                    width,
+                    height,
+                    px + dir_x * (1.0 / 3.0 - 0.5),
+                    py + dir_y * (1.0 / 3.0 - 0.5),
+                );
+                let s1 = sample_rgb_linear(
+                    &src,
+                    width,
+                    height,
+                    px + dir_x * (2.0 / 3.0 - 0.5),
+                    py + dir_y * (2.0 / 3.0 - 0.5),
+                );
+                [
+                    (s0[0] + s1[0]) * 0.5,
+                    (s0[1] + s1[1]) * 0.5,
+                    (s0[2] + s1[2]) * 0.5,
+                ]
+            };
+
+            let rgb_b = {
+                let s0 =
+                    sample_rgb_linear(&src, width, height, px + dir_x * -0.5, py + dir_y * -0.5);
+                let s1 = sample_rgb_linear(&src, width, height, px + dir_x * 0.5, py + dir_y * 0.5);
+                [
+                    rgb_a[0] * 0.5 + (s0[0] + s1[0]) * 0.25,
+                    rgb_a[1] * 0.5 + (s0[1] + s1[1]) * 0.25,
+                    rgb_a[2] * 0.5 + (s0[2] + s1[2]) * 0.25,
+                ]
+            };
+
+            let luma_b = rgb_luma(rgb_b);
+            let rgb = if luma_b < luma_min || luma_b > luma_max {
+                rgb_a
+            } else {
+                rgb_b
+            };
+
+            let idx = (y * width + x) * 4;
+            buffer[idx] = (rgb[0] * 255.0).round().clamp(0.0, 255.0) as u8;
+            buffer[idx + 1] = (rgb[1] * 255.0).round().clamp(0.0, 255.0) as u8;
+            buffer[idx + 2] = (rgb[2] * 255.0).round().clamp(0.0, 255.0) as u8;
+            buffer[idx + 3] = src[idx + 3];
+        }
+    }
+}
+
+fn luma_at(src: &[u8], width: usize, x: usize, y: usize) -> f32 {
+    let idx = (y * width + x) * 4;
+    rgb_luma([
+        src[idx] as f32 / 255.0,
+        src[idx + 1] as f32 / 255.0,
+        src[idx + 2] as f32 / 255.0,
+    ])
+}
+
+fn rgb_luma(rgb: [f32; 3]) -> f32 {
+    rgb[0] * 0.299 + rgb[1] * 0.587 + rgb[2] * 0.114
+}
+
+fn sample_rgb_linear(src: &[u8], width: usize, height: usize, x: f32, y: f32) -> [f32; 3] {
+    let max_x = (width - 1) as f32;
+    let max_y = (height - 1) as f32;
+    let x = x.clamp(0.0, max_x);
+    let y = y.clamp(0.0, max_y);
+
+    let x0 = x.floor() as usize;
+    let y0 = y.floor() as usize;
+    let x1 = (x0 + 1).min(width - 1);
+    let y1 = (y0 + 1).min(height - 1);
+
+    let tx = x - x0 as f32;
+    let ty = y - y0 as f32;
+
+    let c00 = rgb_at(src, width, x0, y0);
+    let c10 = rgb_at(src, width, x1, y0);
+    let c01 = rgb_at(src, width, x0, y1);
+    let c11 = rgb_at(src, width, x1, y1);
+
+    let top = [
+        c00[0] * (1.0 - tx) + c10[0] * tx,
+        c00[1] * (1.0 - tx) + c10[1] * tx,
+        c00[2] * (1.0 - tx) + c10[2] * tx,
+    ];
+    let bottom = [
+        c01[0] * (1.0 - tx) + c11[0] * tx,
+        c01[1] * (1.0 - tx) + c11[1] * tx,
+        c01[2] * (1.0 - tx) + c11[2] * tx,
+    ];
+
+    [
+        top[0] * (1.0 - ty) + bottom[0] * ty,
+        top[1] * (1.0 - ty) + bottom[1] * ty,
+        top[2] * (1.0 - ty) + bottom[2] * ty,
+    ]
+}
+
+fn rgb_at(src: &[u8], width: usize, x: usize, y: usize) -> [f32; 3] {
+    let idx = (y * width + x) * 4;
+    [
+        src[idx] as f32 / 255.0,
+        src[idx + 1] as f32 / 255.0,
+        src[idx + 2] as f32 / 255.0,
+    ]
+}
+
 fn edge_function(a: Pos2, b: Pos2, p: Pos2) -> f32 {
     (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x)
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct GpuPreviewVertex {
+    pos_points: [f32; 2],
+    camera_z: f32,
+    uv: [f32; 2],
+    color: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct GpuPreviewUniform {
+    screen_size_points: [f32; 2],
+    _pad: [f32; 2],
+}
+
+struct SkinPreviewWgpuCallback {
+    skin_vertices: Vec<GpuPreviewVertex>,
+    skin_indices: Vec<u32>,
+    cape_vertices: Vec<GpuPreviewVertex>,
+    cape_indices: Vec<u32>,
+    skin_sample: Arc<RgbaImage>,
+    cape_sample: Option<Arc<RgbaImage>>,
+    skin_hash: u64,
+    cape_hash: Option<u64>,
+    target_format: wgpu::TextureFormat,
+    msaa_samples: u32,
+}
+
+impl SkinPreviewWgpuCallback {
+    fn from_scene(
+        _rect: Rect,
+        triangles: &[RenderTriangle],
+        skin_sample: Arc<RgbaImage>,
+        cape_sample: Option<Arc<RgbaImage>>,
+        target_format: wgpu::TextureFormat,
+        msaa_samples: u32,
+    ) -> Self {
+        let mut skin_vertices = Vec::with_capacity(triangles.len() * 3);
+        let mut skin_indices = Vec::with_capacity(triangles.len() * 3);
+        let mut cape_vertices = Vec::new();
+        let mut cape_indices = Vec::new();
+
+        for tri in triangles {
+            let target = match tri.texture {
+                TriangleTexture::Skin => (&mut skin_vertices, &mut skin_indices),
+                TriangleTexture::Cape => {
+                    if cape_sample.is_some() {
+                        (&mut cape_vertices, &mut cape_indices)
+                    } else {
+                        continue;
+                    }
+                }
+            };
+            let base = target.0.len() as u32;
+            for i in 0..3 {
+                let color = tri.color.to_normalized_gamma_f32();
+                target.0.push(GpuPreviewVertex {
+                    pos_points: [tri.pos[i].x, tri.pos[i].y],
+                    camera_z: tri.depth[i].max(SKIN_PREVIEW_NEAR + 0.000_1),
+                    uv: [tri.uv[i].x, tri.uv[i].y],
+                    color,
+                });
+            }
+            target
+                .1
+                .extend_from_slice(&[base, base.saturating_add(1), base.saturating_add(2)]);
+        }
+
+        let skin_hash = hash_rgba_image(&skin_sample);
+        let cape_hash = cape_sample
+            .as_ref()
+            .map(|image| hash_rgba_image(image.as_ref()));
+
+        Self {
+            skin_vertices,
+            skin_indices,
+            cape_vertices,
+            cape_indices,
+            skin_sample,
+            cape_sample,
+            skin_hash,
+            cape_hash,
+            target_format,
+            msaa_samples,
+        }
+    }
+}
+
+impl egui_wgpu::CallbackTrait for SkinPreviewWgpuCallback {
+    fn prepare(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        screen_descriptor: &egui_wgpu::ScreenDescriptor,
+        _egui_encoder: &mut wgpu::CommandEncoder,
+        callback_resources: &mut egui_wgpu::CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        let resources = callback_resources
+            .entry::<SkinPreviewWgpuResources>()
+            .or_insert_with(|| {
+                SkinPreviewWgpuResources::new(device, self.target_format, self.msaa_samples)
+            });
+        if resources.pipeline.is_none() {
+            *resources =
+                SkinPreviewWgpuResources::new(device, self.target_format, self.msaa_samples);
+        }
+        if resources.target_format != self.target_format
+            || resources.msaa_samples != self.msaa_samples
+        {
+            *resources =
+                SkinPreviewWgpuResources::new(device, self.target_format, self.msaa_samples);
+        }
+        if resources.pipeline.is_none() {
+            return Vec::new();
+        }
+        resources.update_uniform(
+            queue,
+            [
+                screen_descriptor.size_in_pixels[0] as f32 / screen_descriptor.pixels_per_point,
+                screen_descriptor.size_in_pixels[1] as f32 / screen_descriptor.pixels_per_point,
+            ],
+        );
+
+        resources.update_texture(
+            device,
+            queue,
+            TextureSlot::Skin,
+            self.skin_hash,
+            &self.skin_sample,
+        );
+        if let (Some(cape_hash), Some(cape_sample)) = (self.cape_hash, self.cape_sample.as_ref()) {
+            resources.update_texture(device, queue, TextureSlot::Cape, cape_hash, cape_sample);
+        } else {
+            resources.cape_texture = None;
+        }
+
+        resources.update_mesh_buffers(
+            device,
+            queue,
+            &self.skin_vertices,
+            &self.skin_indices,
+            &self.cape_vertices,
+            &self.cape_indices,
+        );
+
+        Vec::new()
+    }
+
+    fn paint(
+        &self,
+        info: egui::PaintCallbackInfo,
+        render_pass: &mut wgpu::RenderPass<'static>,
+        callback_resources: &egui_wgpu::CallbackResources,
+    ) {
+        let Some(resources) = callback_resources.get::<SkinPreviewWgpuResources>() else {
+            return;
+        };
+
+        let Some(pipeline) = resources.pipeline.as_ref() else {
+            return;
+        };
+        render_pass.set_viewport(
+            0.0,
+            0.0,
+            info.screen_size_px[0] as f32,
+            info.screen_size_px[1] as f32,
+            0.0,
+            1.0,
+        );
+        render_pass.set_pipeline(pipeline);
+        render_pass.set_bind_group(1, &resources.uniform_bind_group, &[]);
+
+        if let Some(texture) = resources.skin_texture.as_ref() {
+            render_pass.set_bind_group(0, &texture.bind_group, &[]);
+            render_pass.set_vertex_buffer(0, resources.skin_vertex_buffer.slice(..));
+            render_pass.set_index_buffer(
+                resources.skin_index_buffer.slice(..),
+                wgpu::IndexFormat::Uint32,
+            );
+            render_pass.draw_indexed(0..resources.skin_index_count, 0, 0..1);
+        }
+
+        if let Some(texture) = resources.cape_texture.as_ref() {
+            render_pass.set_bind_group(0, &texture.bind_group, &[]);
+            render_pass.set_vertex_buffer(0, resources.cape_vertex_buffer.slice(..));
+            render_pass.set_index_buffer(
+                resources.cape_index_buffer.slice(..),
+                wgpu::IndexFormat::Uint32,
+            );
+            render_pass.draw_indexed(0..resources.cape_index_count, 0, 0..1);
+        }
+    }
+}
+
+enum TextureSlot {
+    Skin,
+    Cape,
+}
+
+struct UploadedPreviewTexture {
+    hash: u64,
+    size: [u32; 2],
+    bind_group: wgpu::BindGroup,
+    _texture: wgpu::Texture,
+}
+
+struct SkinPreviewWgpuResources {
+    pipeline: Option<wgpu::RenderPipeline>,
+    texture_bind_group_layout: Option<wgpu::BindGroupLayout>,
+    uniform_bind_group: wgpu::BindGroup,
+    uniform_buffer: wgpu::Buffer,
+    skin_texture: Option<UploadedPreviewTexture>,
+    cape_texture: Option<UploadedPreviewTexture>,
+    skin_vertex_buffer: wgpu::Buffer,
+    skin_index_buffer: wgpu::Buffer,
+    cape_vertex_buffer: wgpu::Buffer,
+    cape_index_buffer: wgpu::Buffer,
+    skin_vertex_capacity: usize,
+    skin_index_capacity: usize,
+    cape_vertex_capacity: usize,
+    cape_index_capacity: usize,
+    skin_index_count: u32,
+    cape_index_count: u32,
+    target_format: wgpu::TextureFormat,
+    msaa_samples: u32,
+}
+
+impl SkinPreviewWgpuResources {
+    fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat, msaa_samples: u32) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("skins-preview-shader"),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(
+                r#"
+struct VertexIn {
+    @location(0) pos_points: vec2<f32>,
+    @location(1) camera_z: f32,
+    @location(2) uv: vec2<f32>,
+    @location(3) color: vec4<f32>,
+};
+
+struct Globals {
+    screen_size_points: vec2<f32>,
+    _pad: vec2<f32>,
+};
+
+struct VertexOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) color: vec4<f32>,
+};
+
+@vertex
+fn vs_main(input: VertexIn) -> VertexOut {
+    var out: VertexOut;
+    let x_ndc = (input.pos_points.x / globals.screen_size_points.x) * 2.0 - 1.0;
+    let y_ndc = 1.0 - (input.pos_points.y / globals.screen_size_points.y) * 2.0;
+    let z_cam = max(input.camera_z, 1.5 + 0.0001);
+    let clip_w = z_cam;
+    let clip_z = z_cam - 1.5;
+    out.pos = vec4<f32>(x_ndc * clip_w, y_ndc * clip_w, clip_z, clip_w);
+    out.uv = input.uv;
+    out.color = input.color;
+    return out;
+}
+
+@group(0) @binding(0)
+var preview_tex: texture_2d<f32>;
+@group(1) @binding(0)
+var<uniform> globals: Globals;
+
+@fragment
+fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
+    let dims = vec2<f32>(textureDimensions(preview_tex));
+    let uv = clamp(input.uv, vec2<f32>(0.0, 0.0), vec2<f32>(0.999999, 0.999999));
+    let texel = vec2<i32>(floor(uv * dims));
+    let sampled = textureLoad(preview_tex, texel, 0) * input.color;
+    if sampled.a <= 0.001 {
+        discard;
+    }
+    return sampled;
+}
+"#,
+            )),
+        });
+
+        let texture_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("skins-preview-texture-layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    },
+                    count: None,
+                }],
+            });
+
+        let uniform_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("skins-preview-uniform-layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+
+        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("skins-preview-uniform-buffer"),
+            size: std::mem::size_of::<GpuPreviewUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("skins-preview-uniform-bind-group"),
+            layout: &uniform_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buffer.as_entire_binding(),
+            }],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("skins-preview-pipeline-layout"),
+            bind_group_layouts: &[&texture_bind_group_layout, &uniform_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("skins-preview-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<GpuPreviewVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x2,
+                        1 => Float32,
+                        2 => Float32x2,
+                        3 => Float32x4
+                    ],
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: SKIN_PREVIEW_DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: msaa_samples.max(1),
+                mask: !0,
+                alpha_to_coverage_enabled: msaa_samples > 1,
+            },
+            multiview: None,
+            cache: None,
+        });
+
+        let empty_vertex = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("skins-preview-empty-vertex"),
+            size: std::mem::size_of::<GpuPreviewVertex>() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let empty_index = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("skins-preview-empty-index"),
+            size: std::mem::size_of::<u32>() as u64,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        Self {
+            pipeline: Some(pipeline),
+            texture_bind_group_layout: Some(texture_bind_group_layout),
+            uniform_bind_group,
+            uniform_buffer,
+            skin_texture: None,
+            cape_texture: None,
+            skin_vertex_buffer: empty_vertex.clone(),
+            skin_index_buffer: empty_index.clone(),
+            cape_vertex_buffer: empty_vertex,
+            cape_index_buffer: empty_index,
+            skin_vertex_capacity: 1,
+            skin_index_capacity: 1,
+            cape_vertex_capacity: 1,
+            cape_index_capacity: 1,
+            skin_index_count: 0,
+            cape_index_count: 0,
+            target_format,
+            msaa_samples: msaa_samples.max(1),
+        }
+    }
+
+    fn update_texture(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        slot: TextureSlot,
+        hash: u64,
+        image: &RgbaImage,
+    ) {
+        let size = [image.width(), image.height()];
+        let target = match slot {
+            TextureSlot::Skin => &mut self.skin_texture,
+            TextureSlot::Cape => &mut self.cape_texture,
+        };
+
+        if target
+            .as_ref()
+            .is_some_and(|uploaded| uploaded.hash == hash && uploaded.size == size)
+        {
+            return;
+        }
+
+        let Some(layout) = self.texture_bind_group_layout.as_ref() else {
+            return;
+        };
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("skins-preview-texture"),
+            size: wgpu::Extent3d {
+                width: size[0].max(1),
+                height: size[1].max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            image.as_raw(),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(size[0] * 4),
+                rows_per_image: Some(size[1]),
+            },
+            wgpu::Extent3d {
+                width: size[0].max(1),
+                height: size[1].max(1),
+                depth_or_array_layers: 1,
+            },
+        );
+
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("skins-preview-texture-bind-group"),
+            layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            }],
+        });
+
+        *target = Some(UploadedPreviewTexture {
+            hash,
+            size,
+            bind_group,
+            _texture: texture,
+        });
+    }
+
+    fn update_mesh_buffers(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        skin_vertices: &[GpuPreviewVertex],
+        skin_indices: &[u32],
+        cape_vertices: &[GpuPreviewVertex],
+        cape_indices: &[u32],
+    ) {
+        ensure_buffer(
+            device,
+            &mut self.skin_vertex_buffer,
+            &mut self.skin_vertex_capacity,
+            skin_vertices.len().max(1),
+            std::mem::size_of::<GpuPreviewVertex>(),
+            wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            "skins-preview-skin-vertex-buffer",
+        );
+        ensure_buffer(
+            device,
+            &mut self.skin_index_buffer,
+            &mut self.skin_index_capacity,
+            skin_indices.len().max(1),
+            std::mem::size_of::<u32>(),
+            wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            "skins-preview-skin-index-buffer",
+        );
+        ensure_buffer(
+            device,
+            &mut self.cape_vertex_buffer,
+            &mut self.cape_vertex_capacity,
+            cape_vertices.len().max(1),
+            std::mem::size_of::<GpuPreviewVertex>(),
+            wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            "skins-preview-cape-vertex-buffer",
+        );
+        ensure_buffer(
+            device,
+            &mut self.cape_index_buffer,
+            &mut self.cape_index_capacity,
+            cape_indices.len().max(1),
+            std::mem::size_of::<u32>(),
+            wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            "skins-preview-cape-index-buffer",
+        );
+
+        if !skin_vertices.is_empty() {
+            queue.write_buffer(
+                &self.skin_vertex_buffer,
+                0,
+                bytemuck::cast_slice(skin_vertices),
+            );
+        }
+        if !skin_indices.is_empty() {
+            queue.write_buffer(
+                &self.skin_index_buffer,
+                0,
+                bytemuck::cast_slice(skin_indices),
+            );
+        }
+        if !cape_vertices.is_empty() {
+            queue.write_buffer(
+                &self.cape_vertex_buffer,
+                0,
+                bytemuck::cast_slice(cape_vertices),
+            );
+        }
+        if !cape_indices.is_empty() {
+            queue.write_buffer(
+                &self.cape_index_buffer,
+                0,
+                bytemuck::cast_slice(cape_indices),
+            );
+        }
+
+        self.skin_index_count = skin_indices.len() as u32;
+        self.cape_index_count = cape_indices.len() as u32;
+    }
+
+    fn update_uniform(&self, queue: &wgpu::Queue, screen_size_points: [f32; 2]) {
+        let uniform = GpuPreviewUniform {
+            screen_size_points,
+            _pad: [0.0, 0.0],
+        };
+        queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniform));
+    }
+}
+
+fn ensure_buffer(
+    device: &wgpu::Device,
+    existing: &mut wgpu::Buffer,
+    capacity: &mut usize,
+    desired_items: usize,
+    bytes_per_item: usize,
+    usage: wgpu::BufferUsages,
+    label: &'static str,
+) {
+    if *capacity >= desired_items {
+        return;
+    }
+    let new_capacity = desired_items.next_power_of_two().max(1);
+    *capacity = new_capacity;
+    *existing = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: (new_capacity * bytes_per_item) as u64,
+        usage,
+        mapped_at_creation: false,
+    });
+}
+
+fn hash_rgba_image(image: &RgbaImage) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    image.width().hash(&mut hasher);
+    image.height().hash(&mut hasher);
+    image.as_raw().hash(&mut hasher);
+    hasher.finish()
 }
 
 #[derive(Clone, Copy)]
@@ -1233,16 +2192,27 @@ fn draw_elytra_preview(
 }
 
 fn uv_rect(x: u32, y: u32, w: u32, h: u32) -> Rect {
-    uv_rect_with_inset([64, 64], x, y, w, h)
+    uv_rect_with_inset([64, 64], x, y, w, h, UV_EDGE_INSET_BASE_TEXELS)
 }
 
-fn uv_rect_with_inset(texture_size: [u32; 2], x: u32, y: u32, w: u32, h: u32) -> Rect {
+fn uv_rect_overlay(x: u32, y: u32, w: u32, h: u32) -> Rect {
+    uv_rect_with_inset([64, 64], x, y, w, h, UV_EDGE_INSET_OVERLAY_TEXELS)
+}
+
+fn uv_rect_with_inset(
+    texture_size: [u32; 2],
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    inset_texels: f32,
+) -> Rect {
     let tex_w = texture_size[0].max(1) as f32;
     let tex_h = texture_size[1].max(1) as f32;
     let max_inset_x = ((w as f32) * 0.49) / tex_w;
     let max_inset_y = ((h as f32) * 0.49) / tex_h;
-    let inset_x = (UV_EDGE_INSET_TEXELS / tex_w).min(max_inset_x);
-    let inset_y = (UV_EDGE_INSET_TEXELS / tex_h).min(max_inset_y);
+    let inset_x = (inset_texels / tex_w).min(max_inset_x);
+    let inset_y = (inset_texels / tex_h).min(max_inset_y);
     let min_x = (x as f32 / tex_w) + inset_x;
     let min_y = (y as f32 / tex_h) + inset_y;
     let max_x = ((x + w) as f32 / tex_w) - inset_x;
@@ -1525,13 +2495,18 @@ struct SkinManagerState {
     save_in_progress: bool,
     refresh_in_progress: bool,
     worker_rx: Option<Arc<Mutex<Receiver<WorkerEvent>>>>,
+    wgpu_target_format: Option<wgpu::TextureFormat>,
+    preview_msaa_samples: u32,
+    preview_aa_mode: SkinPreviewAaMode,
+    last_preview_aa_mode: SkinPreviewAaMode,
     skin_texture_hash: Option<u64>,
     skin_texture: Option<TextureHandle>,
-    skin_sample: Option<RgbaImage>,
+    skin_sample: Option<Arc<RgbaImage>>,
     cape_texture_hash: Option<u64>,
     cape_texture: Option<TextureHandle>,
-    cape_sample: Option<RgbaImage>,
+    cape_sample: Option<Arc<RgbaImage>>,
     preview_texture: Option<TextureHandle>,
+    preview_history: Option<PreviewHistory>,
     cape_uv: FaceUvs,
     camera_yaw_offset: f32,
     camera_inertial_velocity: f32,
@@ -1559,6 +2534,10 @@ impl Default for SkinManagerState {
             save_in_progress: false,
             refresh_in_progress: false,
             worker_rx: None,
+            wgpu_target_format: None,
+            preview_msaa_samples: 1,
+            preview_aa_mode: SkinPreviewAaMode::Msaa,
+            last_preview_aa_mode: SkinPreviewAaMode::Msaa,
             skin_texture_hash: None,
             skin_texture: None,
             skin_sample: None,
@@ -1566,6 +2545,7 @@ impl Default for SkinManagerState {
             cape_texture: None,
             cape_sample: None,
             preview_texture: None,
+            preview_history: None,
             cape_uv: default_cape_uv_layout(),
             camera_yaw_offset: 0.0,
             camera_inertial_velocity: 0.0,
@@ -1614,6 +2594,7 @@ impl SkinManagerState {
         self.cape_texture = None;
         self.cape_sample = None;
         self.preview_texture = None;
+        self.preview_history = None;
         self.cape_uv = default_cape_uv_layout();
         self.camera_yaw_offset = 0.0;
         self.camera_inertial_velocity = 0.0;
@@ -1667,6 +2648,7 @@ impl SkinManagerState {
         self.cape_texture = None;
         self.cape_sample = None;
         self.preview_texture = None;
+        self.preview_history = None;
         self.cape_uv = default_cape_uv_layout();
 
         let mut choices = Vec::with_capacity(account.minecraft_profile.capes.len());
@@ -1788,6 +2770,7 @@ impl SkinManagerState {
             self.status_message = Some("Selected skin image could not be decoded.".to_owned());
             return;
         };
+        let image = Arc::new(image);
 
         let size = [image.width() as usize, image.height() as usize];
         let color_image = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
@@ -1826,6 +2809,7 @@ impl SkinManagerState {
             self.cape_uv = default_cape_uv_layout();
             return;
         };
+        let image = Arc::new(image);
 
         self.cape_uv =
             cape_uv_layout([image.width(), image.height()]).unwrap_or_else(default_cape_uv_layout);
@@ -1880,6 +2864,7 @@ impl SkinManagerState {
                 self.skin_texture_hash = None;
                 self.skin_sample = None;
                 self.preview_texture = None;
+                self.preview_history = None;
                 self.status_message = Some("Skin preview updated.".to_owned());
             }
             Err(err) => {
@@ -1998,6 +2983,7 @@ impl SkinManagerState {
         self.cape_texture_hash = None;
         self.cape_sample = None;
         self.preview_texture = None;
+        self.preview_history = None;
         self.cape_uv = default_cape_uv_layout();
     }
 
@@ -2179,17 +3165,24 @@ fn cape_outer_face_uv(texture_size: [u32; 2]) -> Option<Rect> {
     if texture_size[0] < 22 || texture_size[1] < 17 {
         return None;
     }
-    Some(uv_rect_with_inset(texture_size, 1, 1, 10, 16))
+    Some(uv_rect_with_inset(
+        texture_size,
+        1,
+        1,
+        10,
+        16,
+        UV_EDGE_INSET_BASE_TEXELS,
+    ))
 }
 
 fn cape_uv_layout(texture_size: [u32; 2]) -> Option<FaceUvs> {
     let outer = cape_outer_face_uv(texture_size)?;
-    let inner = uv_rect_with_inset(texture_size, 12, 1, 10, 16);
+    let inner = uv_rect_with_inset(texture_size, 12, 1, 10, 16, UV_EDGE_INSET_BASE_TEXELS);
     Some(FaceUvs {
-        top: uv_rect_with_inset(texture_size, 1, 0, 10, 1),
-        bottom: uv_rect_with_inset(texture_size, 11, 0, 10, 1),
-        left: uv_rect_with_inset(texture_size, 0, 1, 1, 16),
-        right: uv_rect_with_inset(texture_size, 11, 1, 1, 16),
+        top: uv_rect_with_inset(texture_size, 1, 0, 10, 1, UV_EDGE_INSET_BASE_TEXELS),
+        bottom: uv_rect_with_inset(texture_size, 11, 0, 10, 1, UV_EDGE_INSET_BASE_TEXELS),
+        left: uv_rect_with_inset(texture_size, 0, 1, 1, 16, UV_EDGE_INSET_BASE_TEXELS),
+        right: uv_rect_with_inset(texture_size, 11, 1, 1, 16, UV_EDGE_INSET_BASE_TEXELS),
         // Cape sits behind the torso in our coordinate space, so the cuboid "back" face is the
         // outward-facing panel visible from behind the player.
         front: inner,
