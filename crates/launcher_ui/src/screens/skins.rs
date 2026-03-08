@@ -3404,8 +3404,13 @@ fn elytra_wing_uvs(texture_size: [u32; 2]) -> Option<ElytraWingUvs> {
     let inset = 0.0;
 
     // Vanilla elytra model uses texOffs(22, 0) with a 10x20x2 cuboid.
-    // That unwrap spans x:[22,46), y:[0,22):
-    // right(2x20), front(10x20), left(2x20), back(10x20), top(10x2), bottom(10x2)
+    // Standard cuboid unwrap coordinates:
+    // top(10x2)    at (24, 0)
+    // bottom(10x2) at (34, 0)
+    // left(2x20)   at (22, 2)
+    // front(10x20) at (24, 2)
+    // right(2x20)  at (34, 2)
+    // back(10x20)  at (36, 2)
     let left = FaceUvs {
         top: flip_uv_rect_x(uv_rect_with_inset(texture_size, 24, 0, 10, 2, inset)),
         bottom: flip_uv_rect_x(uv_rect_with_inset(texture_size, 34, 1, 10, 2, inset)),
@@ -3427,13 +3432,20 @@ fn elytra_wing_uvs(texture_size: [u32; 2]) -> Option<ElytraWingUvs> {
 }
 
 fn default_elytra_texture_image() -> RgbaImage {
+    const DEFAULT_ELYTRA_TEXTURE_PNG: &[u8] = include_bytes!("../assets/default_elytra.png");
+    if let Some(image) = decode_generic_rgba(DEFAULT_ELYTRA_TEXTURE_PNG) {
+        return image;
+    }
+
+    // Fallback only: use a simple neutral texture if embedded bytes ever fail to decode.
     let mut image = RgbaImage::from_pixel(64, 32, image::Rgba([0, 0, 0, 0]));
     let base = image::Rgba([141, 141, 141, 255]);
     let edge = image::Rgba([112, 112, 112, 255]);
-    fill_rect_rgba(&mut image, 22, 1, 20, 20, base);
-    fill_rect_rgba(&mut image, 22, 0, 20, 1, edge);
-    fill_rect_rgba(&mut image, 21, 1, 1, 20, edge);
-    fill_rect_rgba(&mut image, 42, 1, 1, 20, edge);
+    fill_rect_rgba(&mut image, 22, 0, 24, 22, base);
+    fill_rect_rgba(&mut image, 22, 0, 24, 1, edge);
+    fill_rect_rgba(&mut image, 22, 21, 24, 1, edge);
+    fill_rect_rgba(&mut image, 22, 0, 1, 22, edge);
+    fill_rect_rgba(&mut image, 45, 0, 1, 22, edge);
     image
 }
 
