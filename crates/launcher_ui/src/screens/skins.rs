@@ -826,6 +826,65 @@ struct ElytraWingUvs {
     right: FaceUvs,
 }
 
+#[derive(Clone, Copy)]
+struct ElytraWingPose {
+    rotate_x: f32,
+    rotate_y: f32,
+    rotate_z: f32,
+    pivot_y_offset: f32,
+}
+
+#[derive(Clone, Copy)]
+struct ElytraPose {
+    left: ElytraWingPose,
+    right: ElytraWingPose,
+}
+
+const VANILLA_ELYTRA_POSE_STANDING: ElytraPose = ElytraPose {
+    left: ElytraWingPose {
+        rotate_x: 0.261_799_4,
+        rotate_y: -0.087_266_46,
+        rotate_z: -0.261_799_4,
+        pivot_y_offset: 0.0,
+    },
+    right: ElytraWingPose {
+        rotate_x: 0.261_799_4,
+        rotate_y: 0.087_266_46,
+        rotate_z: 0.261_799_4,
+        pivot_y_offset: 0.0,
+    },
+};
+
+const VANILLA_ELYTRA_POSE_SNEAKING: ElytraPose = ElytraPose {
+    left: ElytraWingPose {
+        rotate_x: 0.698_131_7,
+        rotate_y: 0.087_266_46,
+        rotate_z: -0.785_398_2,
+        pivot_y_offset: 3.0,
+    },
+    right: ElytraWingPose {
+        rotate_x: 0.698_131_7,
+        rotate_y: -0.087_266_46,
+        rotate_z: 0.785_398_2,
+        pivot_y_offset: 3.0,
+    },
+};
+
+const VANILLA_ELYTRA_POSE_GLIDE_OPEN: ElytraPose = ElytraPose {
+    left: ElytraWingPose {
+        rotate_x: 0.349_065_84,
+        rotate_y: 0.0,
+        rotate_z: -std::f32::consts::FRAC_PI_2,
+        pivot_y_offset: 0.0,
+    },
+    right: ElytraWingPose {
+        rotate_x: 0.349_065_84,
+        rotate_y: 0.0,
+        rotate_z: std::f32::consts::FRAC_PI_2,
+        pivot_y_offset: 0.0,
+    },
+};
+
 fn add_elytra_triangles(
     out: &mut Vec<RenderTriangle>,
     texture: TriangleTexture,
@@ -838,18 +897,27 @@ fn add_elytra_triangles(
     wing_uvs: ElytraWingUvs,
     light_dir: Vec3,
 ) {
-    // Vanilla-like folded pose while grounded/walking.
-    let left_flap = 15.0_f32.to_radians();
-    let right_flap = 15.0_f32.to_radians();
+    let neutral_pose = VANILLA_ELYTRA_POSE_STANDING;
+    let _ = VANILLA_ELYTRA_POSE_SNEAKING;
+    let _ = VANILLA_ELYTRA_POSE_GLIDE_OPEN;
+    let left_flap = neutral_pose.left.rotate_x;
+    let right_flap = neutral_pose.right.rotate_x;
+    let left_fold_z = neutral_pose.left.rotate_z;
+    let right_fold_z = neutral_pose.right.rotate_z;
 
-    add_cuboid_triangles(
+    let left_hinge_pivot =
+        Vec3::new(-5.0, 24.1 + neutral_pose.left.pivot_y_offset, -2.1) + model_offset;
+    let right_hinge_pivot =
+        Vec3::new(5.0, 24.1 + neutral_pose.right.pivot_y_offset, -2.1) + model_offset;
+
+    add_cuboid_triangles_with_y(
         out,
         texture,
         CuboidSpec {
             size: Vec3::new(10.0, 20.0, 2.0),
-            pivot_top_center: Vec3::new(-5.1, 24.1, -2.1) + model_offset,
+            pivot_top_center: left_hinge_pivot,
             rotate_x: left_flap,
-            rotate_z: -15.0_f32.to_radians(),
+            rotate_z: left_fold_z,
             uv: wing_uvs.left,
             cull_backfaces: false,
         },
@@ -857,15 +925,17 @@ fn add_elytra_triangles(
         projection,
         rect,
         light_dir,
+        neutral_pose.left.rotate_y,
+        Vec3::new(5.0, 0.0, 0.0),
     );
-    add_cuboid_triangles(
+    add_cuboid_triangles_with_y(
         out,
         texture,
         CuboidSpec {
             size: Vec3::new(10.0, 20.0, 2.0),
-            pivot_top_center: Vec3::new(5.1, 24.1, -2.1) + model_offset,
+            pivot_top_center: right_hinge_pivot,
             rotate_x: right_flap,
-            rotate_z: 15.0_f32.to_radians(),
+            rotate_z: right_fold_z,
             uv: wing_uvs.right,
             cull_backfaces: false,
         },
@@ -873,6 +943,8 @@ fn add_elytra_triangles(
         projection,
         rect,
         light_dir,
+        neutral_pose.right.rotate_y,
+        Vec3::new(-5.0, 0.0, 0.0),
     );
 }
 
@@ -2097,6 +2169,15 @@ fn rotate_x(point: Vec3, radians: f32) -> Vec3 {
     )
 }
 
+fn rotate_y(point: Vec3, radians: f32) -> Vec3 {
+    let (sin, cos) = radians.sin_cos();
+    Vec3::new(
+        point.x * cos + point.z * sin,
+        point.y,
+        -point.x * sin + point.z * cos,
+    )
+}
+
 fn rotate_z(point: Vec3, radians: f32) -> Vec3 {
     let (sin, cos) = radians.sin_cos();
     Vec3::new(
@@ -2138,6 +2219,30 @@ fn add_cuboid_triangles(
     projection: Projection,
     rect: Rect,
     light_dir: Vec3,
+) {
+    add_cuboid_triangles_with_y(
+        out,
+        texture,
+        spec,
+        camera,
+        projection,
+        rect,
+        light_dir,
+        0.0,
+        Vec3::new(0.0, 0.0, 0.0),
+    );
+}
+
+fn add_cuboid_triangles_with_y(
+    out: &mut Vec<RenderTriangle>,
+    texture: TriangleTexture,
+    spec: CuboidSpec,
+    camera: &Camera,
+    projection: Projection,
+    rect: Rect,
+    light_dir: Vec3,
+    rotate_y_radians: f32,
+    local_offset: Vec3,
 ) {
     let w = spec.size.x;
     let h = spec.size.y;
@@ -2213,12 +2318,20 @@ fn add_cuboid_triangles(
     ];
 
     for (quad, uv_rect, normal) in faces {
-        let world_normal = rotate_z(rotate_x(normal, spec.rotate_x), spec.rotate_z).normalized();
+        let world_normal = rotate_z(
+            rotate_y(rotate_x(normal, spec.rotate_x), rotate_y_radians),
+            spec.rotate_z,
+        )
+        .normalized();
         let brightness = 0.58 + world_normal.dot(light_dir).max(0.0) * 0.42;
         let tint = color_with_brightness(Color32::WHITE, brightness);
 
         let transformed = quad.map(|vertex| {
-            rotate_z(rotate_x(vertex, spec.rotate_x), spec.rotate_z) + spec.pivot_top_center
+            let vertex = vertex + local_offset;
+            rotate_z(
+                rotate_y(rotate_x(vertex, spec.rotate_x), rotate_y_radians),
+                spec.rotate_z,
+            ) + spec.pivot_top_center
         });
         let camera_vertices = transformed.map(|v| camera.world_to_camera(v));
         if camera_vertices.iter().any(|v| v.z <= projection.near) {
