@@ -1,32 +1,55 @@
 # Vertex Launcher
-A unofficial Minecraft Launcher, Written in Rust with a goal of feature completeness, stylish UI, and cross-ecosystem compatibility while boasting native code and rendering.
+
+An unofficial Minecraft launcher written in Rust, focused on being fast, capable, and pleasant to use.
 
 ---
 
-## Upcoming features:
-- ### Skin Manager
-- ### modrinth content browsing
-- ### curseforge content browsing
-- ### multi-instance support
-- ### multi-account support
-- ### RustServerController Integration
+## Have
+
+What the project already has today:
+
+- A native Rust desktop launcher built with `eframe/egui` + `wgpu`
+- Core instance workflow in place: create, manage, and launch instances
+- Account authentication flow and launch context wiring
+- A library screen, settings screen, console view, legal page, and skin manager screen
+- Configurable themes and UI font options
+- Performance and quality controls (frame limiter, preview AA modes, runtime/config tuning)
+- Modular crates for install/runtime/auth/mod-provider responsibilities
+- multiple instances launched at a time
+- multiple accounts logged in at a time
+- a convenient vanilla minecraft launcher-less experience
+---
+
+## Want
+
+What we are actively aiming for next:
+
+
+- export and import manifests for modpacks
+- Modrinth content browsing in-app
+- CurseForge content browsing in-app
+- RustServerController integration
+- export of pre-made server instances for modpacks
 
 ---
 
-## Our Goals
-my goal is to make a launcher that:
-- respects your privacy
-- works cross-platform
-- gets out of your way
-- lets you use your system to its limits(probably RAM)
-- allows power users to configure it to their liking
-- is expandable enough to adapt to the future of Minecraft and modding
-- allows you to do most everything that other launchers do short of becoming a client
-- is lightweight and fast
-- stable
-- looks great while doing it all
+## Project Direction
 
----
-## How we are going to achieve our goals
+The goal is to keep building a launcher that feels reliable and flexible without getting in your way.
 
-I will eventually implement the launcher using nothing but native code and native rendering APIs, such as Vulkan through WebGPU, which simplifies the process. Ads may run but I will not sell your data to enable the ads to be targeted towards users, this will come at a cost to the launcher's profitability, however, I think it is worth it. I will implement the UI in a way that functions well while looking great, and I will ensure that the launcher is stable and fast, even on older hardware so long as it supports Vulkan, which you will need in order to keep running Minecraft come next year sometime anyways, so the goal is that the launcher works wherever Minecraft runs. I also hope that some point I will be able to offer a "Prefer Integrated Graphics" option for the many of us with gaming pcs to hopefully make rendering happen on un-utilized hardware so the launcher gets out of the way while gaming
+- Privacy-respecting by default
+- Cross-platform where Minecraft can run
+- Fast and lightweight, including on older Vulkan-capable hardware
+- Stable enough for daily use
+- Friendly to both default users and power users
+- Ready to adapt as Minecraft and modding ecosystems evolve
+
+In short: keep the app native, keep it practical, and keep improving the experience one solid feature at a time. do it all while making it from scratch
+
+# Installation
+
+Currently we are in a pre-alpha state, and as such there is no way to install this without building from source. I however do not like complex builds so just clone the repo and run 
+```sh
+cargo build --release
+``` 
+inside the directory you cloned it into.
