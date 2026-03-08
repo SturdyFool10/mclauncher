@@ -46,6 +46,11 @@ The goal is to keep building a launcher that feels reliable and flexible without
 
 In short: keep the app native, keep it practical, and keep improving the experience one solid feature at a time. do it all while making it from scratch
 
+---
+## What we don't do
+
+in general, this launcher is designed to make life simpler for paying minecraft players, it is not an aide for pirates, and it will not allow you to launch the game without a valid Minecraft account and a valid Minecraft license.
+
 # Installation
 
 Currently we are in a pre-alpha state, and as such there is no way to install this without building from source. I however do not like complex builds so just clone the repo and run 
@@ -80,12 +85,3 @@ If your distro does not provide `4.1` packages, use:
 - `libjavascriptcoregtk-4.0-dev`
 
 On Wayland, taskbar/dock icons are resolved via desktop app ID. This app uses `vertexlauncher` as its app ID.
-To avoid a generic Wayland icon, install a matching desktop entry + icon name:
-
-```sh
-mkdir -p ~/.local/share/applications ~/.local/share/icons/hicolor/256x256/apps
-cp packaging/linux/vertexlauncher.desktop ~/.local/share/applications/
-cp crates/launcher_ui/src/assets/vertex.webp ~/.local/share/icons/hicolor/256x256/apps/vertexlauncher.webp
-update-desktop-database ~/.local/share/applications 2>/dev/null || true
-gtk-update-icon-cache ~/.local/share/icons/hicolor 2>/dev/null || true
-```
