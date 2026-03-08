@@ -55,6 +55,7 @@ pub fn render(
     }
     state.poll_worker(ui.ctx());
     state.ensure_skin_texture(ui.ctx());
+    state.ensure_default_elytra_texture(ui.ctx());
     state.ensure_cape_texture(ui.ctx());
     ui.ctx()
         .request_repaint_after(Duration::from_secs_f32(1.0 / PREVIEW_TARGET_FPS));
@@ -258,8 +259,10 @@ fn render_preview(ui: &mut Ui, text_ui: &mut TextUi, state: &mut SkinManagerStat
 
     let skin_texture = state.skin_texture.as_ref();
     let cape_texture = state.cape_texture.as_ref();
+    let default_elytra_texture = state.default_elytra_texture.as_ref();
     let skin_sample = state.skin_sample.as_ref().cloned();
     let cape_sample = state.cape_sample.as_ref().cloned();
+    let default_elytra_sample = state.default_elytra_sample.as_ref().cloned();
     let cape_uv = state.cape_uv;
     let variant = state.pending_variant;
     let show_elytra = state.show_elytra;
@@ -276,10 +279,13 @@ fn render_preview(ui: &mut Ui, text_ui: &mut TextUi, state: &mut SkinManagerStat
             rect,
             skin_texture,
             cape_texture,
+            default_elytra_texture,
             skin_sample,
             cape_sample,
+            default_elytra_sample,
             cape_uv,
             yaw,
+            now as f32,
             walk,
             variant,
             show_elytra,
@@ -346,10 +352,13 @@ fn draw_character(
     rect: Rect,
     skin_texture: &TextureHandle,
     cape_texture: Option<&TextureHandle>,
+    default_elytra_texture: Option<&TextureHandle>,
     skin_sample: Option<Arc<RgbaImage>>,
     cape_sample: Option<Arc<RgbaImage>>,
+    default_elytra_sample: Option<Arc<RgbaImage>>,
     cape_uv: FaceUvs,
     yaw: f32,
+    time_seconds: f32,
     walk_phase: f32,
     variant: MinecraftSkinVariant,
     show_elytra: bool,
@@ -525,7 +534,9 @@ fn draw_character(
             size: Vec3::new(8.0, 12.0, 4.0),
             pivot_top_center: Vec3::new(0.0, 24.0, 0.0) + model_offset,
             rotate_x: 0.0,
+            rotate_z: 0.0,
             uv: torso_uv,
+            cull_backfaces: true,
         },
         &camera,
         projection,
@@ -539,7 +550,9 @@ fn draw_character(
             size: Vec3::new(8.6, 12.6, 4.6),
             pivot_top_center: Vec3::new(0.0, 24.2, 0.0) + model_offset,
             rotate_x: 0.0,
+            rotate_z: 0.0,
             uv: torso_overlay_uv,
+            cull_backfaces: false,
         },
         &camera,
         projection,
@@ -554,7 +567,9 @@ fn draw_character(
             size: Vec3::new(8.0, 8.0, 8.0),
             pivot_top_center: Vec3::new(0.0, 32.0, 0.0) + model_offset,
             rotate_x: 0.0,
+            rotate_z: 0.0,
             uv: head_uv,
+            cull_backfaces: true,
         },
         &camera,
         projection,
@@ -568,7 +583,9 @@ fn draw_character(
             size: Vec3::new(8.8, 8.8, 8.8),
             pivot_top_center: Vec3::new(0.0, 32.4, 0.0) + model_offset,
             rotate_x: 0.0,
+            rotate_z: 0.0,
             uv: head_overlay_uv,
+            cull_backfaces: false,
         },
         &camera,
         projection,
@@ -584,7 +601,9 @@ fn draw_character(
             size: Vec3::new(arm_width, 12.0, 4.0),
             pivot_top_center: Vec3::new(-shoulder_x, 24.0, 0.0) + model_offset,
             rotate_x: arm_swing,
+            rotate_z: 0.0,
             uv: left_arm_uv,
+            cull_backfaces: true,
         },
         &camera,
         projection,
@@ -598,7 +617,9 @@ fn draw_character(
             size: Vec3::new(arm_width + 0.55, 12.55, 4.55),
             pivot_top_center: Vec3::new(-shoulder_x, 24.15, 0.0) + model_offset,
             rotate_x: arm_swing,
+            rotate_z: 0.0,
             uv: left_arm_overlay_uv,
+            cull_backfaces: false,
         },
         &camera,
         projection,
@@ -612,7 +633,9 @@ fn draw_character(
             size: Vec3::new(arm_width, 12.0, 4.0),
             pivot_top_center: Vec3::new(shoulder_x, 24.0, 0.0) + model_offset,
             rotate_x: -arm_swing,
+            rotate_z: 0.0,
             uv: right_arm_uv,
+            cull_backfaces: true,
         },
         &camera,
         projection,
@@ -626,7 +649,9 @@ fn draw_character(
             size: Vec3::new(arm_width + 0.55, 12.55, 4.55),
             pivot_top_center: Vec3::new(shoulder_x, 24.15, 0.0) + model_offset,
             rotate_x: -arm_swing,
+            rotate_z: 0.0,
             uv: right_arm_overlay_uv,
+            cull_backfaces: false,
         },
         &camera,
         projection,
@@ -641,7 +666,9 @@ fn draw_character(
             size: Vec3::new(4.0, 12.0, 4.0),
             pivot_top_center: Vec3::new(-2.0, 12.0, 0.0) + model_offset,
             rotate_x: leg_swing,
+            rotate_z: 0.0,
             uv: left_leg_uv,
+            cull_backfaces: true,
         },
         &camera,
         projection,
@@ -655,7 +682,9 @@ fn draw_character(
             size: Vec3::new(4.55, 12.55, 4.55),
             pivot_top_center: Vec3::new(-2.0, 12.15, 0.0) + model_offset,
             rotate_x: leg_swing,
+            rotate_z: 0.0,
             uv: leg_overlay_uv,
+            cull_backfaces: false,
         },
         &camera,
         projection,
@@ -670,7 +699,9 @@ fn draw_character(
             size: Vec3::new(4.0, 12.0, 4.0),
             pivot_top_center: Vec3::new(2.0, 12.0, 0.0) + model_offset,
             rotate_x: -leg_swing,
+            rotate_z: 0.0,
             uv: right_leg_uv,
+            cull_backfaces: true,
         },
         &camera,
         projection,
@@ -684,7 +715,9 @@ fn draw_character(
             size: Vec3::new(4.55, 12.55, 4.55),
             pivot_top_center: Vec3::new(2.0, 12.15, 0.0) + model_offset,
             rotate_x: -leg_swing,
+            rotate_z: 0.0,
             uv: leg_overlay_uv,
+            cull_backfaces: false,
         },
         &camera,
         projection,
@@ -694,7 +727,11 @@ fn draw_character(
 
     let mut scene_tris = base_tris;
     scene_tris.extend(overlay_tris);
-    if cape_texture.is_some() {
+
+    let mut cape_render_texture = cape_texture;
+    let mut cape_render_sample = cape_sample;
+
+    if cape_texture.is_some() && !show_elytra {
         add_cape_triangles(
             &mut scene_tris,
             TriangleTexture::Cape,
@@ -707,25 +744,49 @@ fn draw_character(
             light_dir,
         );
     }
+
+    if show_elytra {
+        if cape_render_texture.is_none() {
+            cape_render_texture = default_elytra_texture;
+        }
+        if cape_render_sample.is_none() {
+            cape_render_sample = default_elytra_sample.clone();
+        }
+        let elytra_sample = cape_render_sample.as_ref();
+
+        let uv_layout = elytra_sample
+            .map(|image| [image.width(), image.height()])
+            .and_then(elytra_wing_uvs)
+            .unwrap_or_else(default_elytra_wing_uvs);
+        add_elytra_triangles(
+            &mut scene_tris,
+            TriangleTexture::Cape,
+            &camera,
+            projection,
+            rect,
+            model_offset,
+            time_seconds,
+            walk_phase,
+            uv_layout,
+            light_dir,
+        );
+    }
+
     render_depth_buffered_scene(
         ui,
         painter,
         rect,
         &scene_tris,
         skin_texture,
-        cape_texture,
+        cape_render_texture,
         skin_sample,
-        cape_sample,
+        cape_render_sample,
         wgpu_target_format,
         preview_msaa_samples,
         preview_aa_mode,
         preview_texture,
         preview_history,
     );
-
-    if show_elytra {
-        draw_elytra_preview(painter, &camera, projection, rect, model_offset);
-    }
 }
 
 fn add_cape_triangles(
@@ -748,7 +809,65 @@ fn add_cape_triangles(
             size: Vec3::new(10.0, 16.0, 1.0),
             pivot_top_center: pivot,
             rotate_x: cape_tilt,
+            rotate_z: 0.0,
             uv: cape_uv,
+            cull_backfaces: true,
+        },
+        camera,
+        projection,
+        rect,
+        light_dir,
+    );
+}
+
+#[derive(Clone, Copy)]
+struct ElytraWingUvs {
+    left: FaceUvs,
+    right: FaceUvs,
+}
+
+fn add_elytra_triangles(
+    out: &mut Vec<RenderTriangle>,
+    texture: TriangleTexture,
+    camera: &Camera,
+    projection: Projection,
+    rect: Rect,
+    model_offset: Vec3,
+    _time_seconds: f32,
+    _walk_phase: f32,
+    wing_uvs: ElytraWingUvs,
+    light_dir: Vec3,
+) {
+    // Vanilla-like folded pose while grounded/walking.
+    let left_flap = 15.0_f32.to_radians();
+    let right_flap = 15.0_f32.to_radians();
+
+    add_cuboid_triangles(
+        out,
+        texture,
+        CuboidSpec {
+            size: Vec3::new(10.0, 20.0, 2.0),
+            pivot_top_center: Vec3::new(-5.1, 24.1, -2.1) + model_offset,
+            rotate_x: left_flap,
+            rotate_z: -15.0_f32.to_radians(),
+            uv: wing_uvs.left,
+            cull_backfaces: false,
+        },
+        camera,
+        projection,
+        rect,
+        light_dir,
+    );
+    add_cuboid_triangles(
+        out,
+        texture,
+        CuboidSpec {
+            size: Vec3::new(10.0, 20.0, 2.0),
+            pivot_top_center: Vec3::new(5.1, 24.1, -2.1) + model_offset,
+            rotate_x: right_flap,
+            rotate_z: 15.0_f32.to_radians(),
+            uv: wing_uvs.right,
+            cull_backfaces: false,
         },
         camera,
         projection,
@@ -1950,7 +2069,9 @@ struct CuboidSpec {
     size: Vec3,
     pivot_top_center: Vec3,
     rotate_x: f32,
+    rotate_z: f32,
     uv: FaceUvs,
+    cull_backfaces: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1973,6 +2094,15 @@ fn rotate_x(point: Vec3, radians: f32) -> Vec3 {
         point.x,
         point.y * cos - point.z * sin,
         point.y * sin + point.z * cos,
+    )
+}
+
+fn rotate_z(point: Vec3, radians: f32) -> Vec3 {
+    let (sin, cos) = radians.sin_cos();
+    Vec3::new(
+        point.x * cos - point.y * sin,
+        point.x * sin + point.y * cos,
+        point.z,
     )
 }
 
@@ -2083,28 +2213,31 @@ fn add_cuboid_triangles(
     ];
 
     for (quad, uv_rect, normal) in faces {
-        let world_normal = rotate_x(normal, spec.rotate_x).normalized();
+        let world_normal = rotate_z(rotate_x(normal, spec.rotate_x), spec.rotate_z).normalized();
         let brightness = 0.58 + world_normal.dot(light_dir).max(0.0) * 0.42;
         let tint = color_with_brightness(Color32::WHITE, brightness);
 
-        let transformed =
-            quad.map(|vertex| rotate_x(vertex, spec.rotate_x) + spec.pivot_top_center);
+        let transformed = quad.map(|vertex| {
+            rotate_z(rotate_x(vertex, spec.rotate_x), spec.rotate_z) + spec.pivot_top_center
+        });
         let camera_vertices = transformed.map(|v| camera.world_to_camera(v));
         if camera_vertices.iter().any(|v| v.z <= projection.near) {
             continue;
         }
-        // Cull faces that point away from the camera to reduce overdraw artifacts.
-        let normal_camera = Vec3::new(
-            world_normal.dot(camera.right),
-            world_normal.dot(camera.up),
-            world_normal.dot(camera.forward),
-        );
-        let center_camera =
-            (camera_vertices[0] + camera_vertices[1] + camera_vertices[2] + camera_vertices[3])
-                * 0.25;
-        let to_camera = (Vec3::new(0.0, 0.0, 0.0) - center_camera).normalized();
-        if normal_camera.dot(to_camera) <= 0.0 {
-            continue;
+        if spec.cull_backfaces {
+            // Cull faces that point away from the camera to reduce overdraw artifacts.
+            let normal_camera = Vec3::new(
+                world_normal.dot(camera.right),
+                world_normal.dot(camera.up),
+                world_normal.dot(camera.forward),
+            );
+            let center_camera =
+                (camera_vertices[0] + camera_vertices[1] + camera_vertices[2] + camera_vertices[3])
+                    * 0.25;
+            let to_camera = (Vec3::new(0.0, 0.0, 0.0) - center_camera).normalized();
+            if normal_camera.dot(to_camera) <= 0.0 {
+                continue;
+            }
         }
         let projected = camera_vertices.map(|v| project_point(v, projection, rect));
         if projected.iter().any(Option::is_none) {
@@ -2141,46 +2274,6 @@ fn add_cuboid_triangles(
     }
 }
 
-fn draw_elytra_preview(
-    painter: &egui::Painter,
-    camera: &Camera,
-    projection: Projection,
-    rect: Rect,
-    model_offset: Vec3,
-) {
-    let wing_color = Color32::from_rgba_premultiplied(145, 70, 70, 92);
-    let left = [
-        Vec3::new(-2.0, 24.0, -2.2),
-        Vec3::new(-13.0, 23.0, -3.3),
-        Vec3::new(-13.0, 10.0, -2.8),
-        Vec3::new(-2.0, 12.0, -1.8),
-    ]
-    .map(|v| v + model_offset);
-    let right = [
-        Vec3::new(2.0, 24.0, -2.2),
-        Vec3::new(13.0, 23.0, -3.3),
-        Vec3::new(13.0, 10.0, -2.8),
-        Vec3::new(2.0, 12.0, -1.8),
-    ]
-    .map(|v| v + model_offset);
-    for wing in [left, right] {
-        let camera_vertices = wing.map(|v| camera.world_to_camera(v));
-        if camera_vertices.iter().any(|v| v.z <= projection.near) {
-            continue;
-        }
-        let projected = camera_vertices.map(|v| project_point(v, projection, rect));
-        if projected.iter().any(Option::is_none) {
-            continue;
-        }
-        let projected = projected.map(Option::unwrap);
-        painter.add(egui::Shape::convex_polygon(
-            vec![projected[0], projected[1], projected[2], projected[3]],
-            wing_color,
-            Stroke::new(1.0, Color32::from_rgba_premultiplied(210, 120, 120, 120)),
-        ));
-    }
-}
-
 fn uv_rect(x: u32, y: u32, w: u32, h: u32) -> Rect {
     uv_rect_with_inset([64, 64], x, y, w, h, UV_EDGE_INSET_BASE_TEXELS)
 }
@@ -2208,6 +2301,13 @@ fn uv_rect_with_inset(
     let max_x = ((x + w) as f32 / tex_w) - inset_x;
     let max_y = ((y + h) as f32 / tex_h) - inset_y;
     Rect::from_min_max(egui::pos2(min_x, min_y), egui::pos2(max_x, max_y))
+}
+
+fn flip_uv_rect_x(rect: Rect) -> Rect {
+    Rect::from_min_max(
+        egui::pos2(rect.max.x, rect.min.y),
+        egui::pos2(rect.min.x, rect.max.y),
+    )
 }
 
 fn render_cape_grid(ui: &mut Ui, text_ui: &mut TextUi, state: &mut SkinManagerState) {
@@ -2494,6 +2594,8 @@ struct SkinManagerState {
     cape_texture_hash: Option<u64>,
     cape_texture: Option<TextureHandle>,
     cape_sample: Option<Arc<RgbaImage>>,
+    default_elytra_texture: Option<TextureHandle>,
+    default_elytra_sample: Option<Arc<RgbaImage>>,
     preview_texture: Option<TextureHandle>,
     preview_history: Option<PreviewHistory>,
     cape_uv: FaceUvs,
@@ -2534,6 +2636,8 @@ impl Default for SkinManagerState {
             cape_texture_hash: None,
             cape_texture: None,
             cape_sample: None,
+            default_elytra_texture: None,
+            default_elytra_sample: None,
             preview_texture: None,
             preview_history: None,
             cape_uv: default_cape_uv_layout(),
@@ -2777,6 +2881,20 @@ impl SkinManagerState {
         self.skin_texture_hash = Some(hash);
     }
 
+    fn ensure_default_elytra_texture(&mut self, ctx: &egui::Context) {
+        if self.default_elytra_texture.is_some() && self.default_elytra_sample.is_some() {
+            return;
+        }
+
+        let image = Arc::new(default_elytra_texture_image());
+        let size = [image.width() as usize, image.height() as usize];
+        let color_image = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
+        let texture =
+            ctx.load_texture("skins/default-elytra", color_image, TextureOptions::NEAREST);
+        self.default_elytra_texture = Some(texture);
+        self.default_elytra_sample = Some(image);
+    }
+
     fn ensure_cape_texture(&mut self, ctx: &egui::Context) {
         let active_png = self.selected_cape_png();
         let Some(bytes) = active_png else {
@@ -2813,6 +2931,7 @@ impl SkinManagerState {
             color_image,
             TextureOptions::NEAREST,
         );
+
         self.cape_texture = Some(texture);
         self.cape_sample = Some(image);
         self.cape_texture_hash = Some(hash);
@@ -3151,6 +3270,70 @@ fn full_face_uvs() -> FaceUvs {
 
 fn default_cape_uv_layout() -> FaceUvs {
     cape_uv_layout([64, 32]).unwrap_or_else(full_face_uvs)
+}
+
+fn default_elytra_wing_uvs() -> ElytraWingUvs {
+    elytra_wing_uvs([64, 32]).unwrap_or(ElytraWingUvs {
+        left: full_face_uvs(),
+        right: full_face_uvs(),
+    })
+}
+
+fn elytra_wing_uvs(texture_size: [u32; 2]) -> Option<ElytraWingUvs> {
+    if texture_size[0] < 46 || texture_size[1] < 22 {
+        return None;
+    }
+    let inset = 0.0;
+
+    // Vanilla elytra model uses texOffs(22, 0) with a 10x20x2 cuboid.
+    // That unwrap spans x:[22,46), y:[0,22):
+    // right(2x20), front(10x20), left(2x20), back(10x20), top(10x2), bottom(10x2)
+    let left = FaceUvs {
+        top: flip_uv_rect_x(uv_rect_with_inset(texture_size, 24, 0, 10, 2, inset)),
+        bottom: flip_uv_rect_x(uv_rect_with_inset(texture_size, 34, 1, 10, 2, inset)),
+        left: flip_uv_rect_x(uv_rect_with_inset(texture_size, 34, 2, 2, 20, inset)),
+        right: flip_uv_rect_x(uv_rect_with_inset(texture_size, 22, 2, 2, 20, inset)),
+        front: flip_uv_rect_x(uv_rect_with_inset(texture_size, 24, 2, 10, 20, inset)),
+        back: flip_uv_rect_x(uv_rect_with_inset(texture_size, 36, 2, 10, 20, inset)),
+    };
+    // Right wing mirrors the side strip assignment.
+    let right = FaceUvs {
+        top: uv_rect_with_inset(texture_size, 24, 0, 10, 2, inset),
+        bottom: uv_rect_with_inset(texture_size, 34, 1, 10, 2, inset),
+        left: uv_rect_with_inset(texture_size, 22, 2, 2, 20, inset),
+        right: uv_rect_with_inset(texture_size, 34, 2, 2, 20, inset),
+        front: uv_rect_with_inset(texture_size, 24, 2, 10, 20, inset),
+        back: uv_rect_with_inset(texture_size, 36, 2, 10, 20, inset),
+    };
+    Some(ElytraWingUvs { left, right })
+}
+
+fn default_elytra_texture_image() -> RgbaImage {
+    let mut image = RgbaImage::from_pixel(64, 32, image::Rgba([0, 0, 0, 0]));
+    let base = image::Rgba([141, 141, 141, 255]);
+    let edge = image::Rgba([112, 112, 112, 255]);
+    fill_rect_rgba(&mut image, 22, 1, 20, 20, base);
+    fill_rect_rgba(&mut image, 22, 0, 20, 1, edge);
+    fill_rect_rgba(&mut image, 21, 1, 1, 20, edge);
+    fill_rect_rgba(&mut image, 42, 1, 1, 20, edge);
+    image
+}
+
+fn fill_rect_rgba(
+    image: &mut RgbaImage,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    color: image::Rgba<u8>,
+) {
+    let max_x = image.width();
+    let max_y = image.height();
+    for py in y..y.saturating_add(height).min(max_y) {
+        for px in x..x.saturating_add(width).min(max_x) {
+            image.put_pixel(px, py, color);
+        }
+    }
 }
 
 fn cape_outer_face_uv(texture_size: [u32; 2]) -> Option<Rect> {
