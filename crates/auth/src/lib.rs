@@ -93,7 +93,74 @@ pub fn login_finish(code: &str, flow: MinecraftLoginFlow) -> Result<CachedAccoun
         .map_err(|err| error::prefix_auth_error("GetOAuthToken", err))?;
 
     // Continue through Xbox -> XSTS -> Minecraft service token chain.
-    minecraft::complete_minecraft_login(&agent, &microsoft_token.access_token)
+    minecraft::complete_minecraft_login(
+        &agent,
+        &microsoft_token.access_token,
+        microsoft_token.refresh_token.as_deref(),
+    )
+}
+
+/// Renews cached account sessions using stored Microsoft refresh tokens.
+///
+/// Accounts without refresh tokens are left unchanged.
+pub fn renew_cached_accounts_tokens(client_id: &str) -> Result<CachedAccountsState, AuthError> {
+    let mut state = cache::load_cached_accounts()?;
+    if state.accounts.is_empty() {
+        return Ok(state);
+    }
+
+    let agent = util::build_http_agent();
+    let mut any_updated = false;
+
+    for account in &mut state.accounts {
+        let Some(refresh_token) = account
+            .microsoft_refresh_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            tracing::info!(
+                target: "vertexlauncher/auth/renew",
+                profile = %account.minecraft_profile.id,
+                "Skipping token renewal: no Microsoft refresh token cached."
+            );
+            continue;
+        };
+
+        match oauth::refresh_microsoft_token(&agent, client_id, refresh_token).and_then(
+            |microsoft_token| {
+                minecraft::complete_minecraft_login(
+                    &agent,
+                    &microsoft_token.access_token,
+                    microsoft_token.refresh_token.as_deref(),
+                )
+            },
+        ) {
+            Ok(renewed) => {
+                tracing::info!(
+                    target: "vertexlauncher/auth/renew",
+                    profile = %renewed.minecraft_profile.id,
+                    "Renewed cached account session."
+                );
+                *account = renewed;
+                any_updated = true;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    target: "vertexlauncher/auth/renew",
+                    profile = %account.minecraft_profile.id,
+                    error = %err,
+                    "Failed to renew cached account session; keeping existing cached token."
+                );
+            }
+        }
+    }
+
+    state = state.normalize();
+    if any_updated {
+        cache::save_cached_accounts(&state)?;
+    }
+    Ok(state)
 }
 
 /// Completes login from a full callback URL by extracting and validating `code`.
@@ -116,19 +183,22 @@ pub fn upload_minecraft_skin(
     access_token: &str,
     skin_png_bytes: &[u8],
     variant: MinecraftSkinVariant,
-) -> Result<(), AuthError> {
+) -> Result<MinecraftProfileState, AuthError> {
     let agent = util::build_http_agent();
     minecraft::upload_profile_skin(&agent, access_token, skin_png_bytes, variant)
 }
 
 /// Activates one owned cape id for the active profile.
-pub fn set_active_minecraft_cape(access_token: &str, cape_id: &str) -> Result<(), AuthError> {
+pub fn set_active_minecraft_cape(
+    access_token: &str,
+    cape_id: &str,
+) -> Result<MinecraftProfileState, AuthError> {
     let agent = util::build_http_agent();
     minecraft::set_active_profile_cape(&agent, access_token, cape_id)
 }
 
 /// Clears the active cape for the active profile.
-pub fn clear_active_minecraft_cape(access_token: &str) -> Result<(), AuthError> {
+pub fn clear_active_minecraft_cape(access_token: &str) -> Result<MinecraftProfileState, AuthError> {
     let agent = util::build_http_agent();
     minecraft::clear_active_profile_cape(&agent, access_token)
 }

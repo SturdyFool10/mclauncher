@@ -64,7 +64,29 @@ pub struct AuthState {
 impl AuthState {
     pub fn load() -> Self {
         let (accounts_state, status) = match auth::load_cached_accounts() {
-            Ok(state) => (state, AuthUiStatus::Idle),
+            Ok(state) => {
+                if state.accounts.is_empty() {
+                    (state, AuthUiStatus::Idle)
+                } else {
+                    match microsoft_client_id() {
+                        Ok(client_id) => match auth::renew_cached_accounts_tokens(&client_id) {
+                            Ok(renewed) => (renewed, AuthUiStatus::Idle),
+                            Err(err) => (
+                                state,
+                                AuthUiStatus::Error(format!(
+                                    "Loaded cached accounts, but token renewal failed: {err}"
+                                )),
+                            ),
+                        },
+                        Err(err) => (
+                            state,
+                            AuthUiStatus::Error(format!(
+                                "Loaded cached accounts, but token renewal was skipped: {err}"
+                            )),
+                        ),
+                    }
+                }
+            }
             Err(err) => (
                 CachedAccountsState::default(),
                 AuthUiStatus::Error(format!("Failed to load cached account state: {err}")),

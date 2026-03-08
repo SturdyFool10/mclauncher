@@ -56,6 +56,7 @@ struct VertexApp {
     auth: AuthState,
     text_ui: TextUi,
     last_frame_end: Option<Instant>,
+    last_rendered_screen: Option<screens::AppScreen>,
 }
 
 impl VertexApp {
@@ -110,6 +111,7 @@ impl VertexApp {
             auth: AuthState::load(),
             text_ui,
             last_frame_end: None,
+            last_rendered_screen: None,
         };
 
         app.refresh_instance_shortcuts();
@@ -316,6 +318,8 @@ impl eframe::App for VertexApp {
         let mut screen_output = screens::ScreenOutput::default();
         let wgpu_target_format = frame.wgpu_render_state().map(|state| state.target_format);
         let skin_preview_msaa_samples = 4;
+        let skin_manager_opened = self.active_screen == screens::AppScreen::Skins
+            && self.last_rendered_screen != Some(screens::AppScreen::Skins);
         CentralPanel::default()
             .frame(
                 egui::Frame::new()
@@ -331,6 +335,7 @@ impl eframe::App for VertexApp {
                 screen_output = screens::render(
                     ui,
                     self.active_screen,
+                    skin_manager_opened,
                     self.selected_instance_id.as_deref(),
                     self.auth.display_name(),
                     active_launch_auth.as_ref(),
@@ -345,6 +350,7 @@ impl eframe::App for VertexApp {
                     &mut self.text_ui,
                 );
             });
+        self.last_rendered_screen = Some(self.active_screen);
 
         if screen_output.instances_changed {
             self.refresh_instance_shortcuts();

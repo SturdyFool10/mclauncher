@@ -105,7 +105,11 @@ pub(crate) fn load_cached_accounts() -> Result<CachedAccountsState, AuthError> {
 pub(crate) fn save_cached_accounts(state: &CachedAccountsState) -> Result<(), AuthError> {
     let path = account_cache_path();
     maybe_migrate_legacy_account_cache(&path)?;
-    let json = serde_json::to_string_pretty(&state.clone().normalize())?;
+    let mut normalized = state.clone().normalize();
+    for account in &mut normalized.accounts {
+        sanitize_cached_profile(account);
+    }
+    let json = serde_json::to_string_pretty(&normalized)?;
     write_secure_file_atomic(&path, json.as_bytes())
 }
 
@@ -251,4 +255,17 @@ fn write_secure_file_atomic(path: &Path, bytes: &[u8]) -> Result<(), AuthError> 
 
     fs_rename(temp_path, path)?;
     Ok(())
+}
+
+fn sanitize_cached_profile(account: &mut CachedAccount) {
+    // Persist only long-lived renewal credentials and static profile assets.
+    // Runtime access tokens are session-scoped and must not be written to disk.
+    account.minecraft_access_token = None;
+
+    // Keep identity and owned cape textures, but do not persist skin data
+    // or any equipped-state flags that can go stale between sessions.
+    account.minecraft_profile.skins.clear();
+    for cape in &mut account.minecraft_profile.capes {
+        cape.state.clear();
+    }
 }

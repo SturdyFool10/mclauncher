@@ -2,7 +2,7 @@ pub(crate) const OAUTH_BASE_URL: &str = "https://login.microsoftonline.com";
 pub(crate) const LIVE_AUTHORIZE_URL: &str = "https://login.live.com/oauth20_authorize.srf";
 pub(crate) const LIVE_TOKEN_URL: &str = "https://login.live.com/oauth20_token.srf";
 pub(crate) const LIVE_REDIRECT_URI: &str = "https://login.live.com/oauth20_desktop.srf";
-pub(crate) const LIVE_SCOPE: &str = "service::user.auth.xboxlive.com::MBI_SSL";
+pub(crate) const LIVE_SCOPE: &str = "service::user.auth.xboxlive.com::MBI_SSL offline_access";
 pub(crate) const DEVICE_CODE_SCOPE: &str = "XboxLive.signin offline_access";
 
 pub(crate) const XBOX_USER_AUTH_URL: &str = "https://user.auth.xboxlive.com/user/authenticate";

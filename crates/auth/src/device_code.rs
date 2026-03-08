@@ -34,7 +34,11 @@ pub(crate) fn run_device_code_login(
         poll_for_microsoft_token(&agent, &client_id, &tenant, &device_code, sender)
             .map_err(|err| prefix_auth_error("PollForMicrosoftToken", err))?;
 
-    let account = complete_minecraft_login(&agent, &microsoft_token.access_token)?;
+    let account = complete_minecraft_login(
+        &agent,
+        &microsoft_token.access_token,
+        microsoft_token.refresh_token.as_deref(),
+    )?;
     let _ = sender.send(LoginEvent::Completed(account));
     tracing::info!(
         target: "vertexlauncher/auth/device_code",

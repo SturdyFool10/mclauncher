@@ -31,6 +31,8 @@ pub(crate) struct DeviceCodeResponse {
 #[derive(Debug, Deserialize)]
 pub(crate) struct MicrosoftTokenResponse {
     pub(crate) access_token: String,
+    #[serde(default)]
+    pub(crate) refresh_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -107,6 +109,43 @@ pub(crate) fn exchange_auth_code_for_microsoft_token(
 
             Err(AuthError::OAuth(
                 "Authorization-code exchange failed with an unknown response".to_owned(),
+            ))
+        }
+        Err(err) => Err(map_http_error(err)),
+    }
+}
+
+pub(crate) fn refresh_microsoft_token(
+    agent: &ureq::Agent,
+    client_id: &str,
+    refresh_token: &str,
+) -> Result<MicrosoftTokenResponse, AuthError> {
+    let response = agent
+        .post(LIVE_TOKEN_URL)
+        .set("Accept", "application/json")
+        .send_form(&[
+            ("client_id", client_id),
+            ("refresh_token", refresh_token),
+            ("grant_type", "refresh_token"),
+            ("redirect_uri", LIVE_REDIRECT_URI),
+            ("scope", LIVE_SCOPE),
+        ]);
+
+    match response {
+        Ok(ok) => Ok(ok.into_json::<MicrosoftTokenResponse>()?),
+        Err(ureq::Error::Status(_, err_response)) => {
+            if let Ok(oauth_error) = err_response.into_json::<OAuthErrorResponse>() {
+                let description = oauth_error
+                    .error_description
+                    .unwrap_or_else(|| "No details provided".to_owned());
+                return Err(AuthError::OAuth(format!(
+                    "{}: {}",
+                    oauth_error.error, description
+                )));
+            }
+
+            Err(AuthError::OAuth(
+                "Refresh-token exchange failed with an unknown response".to_owned(),
             ))
         }
         Err(err) => Err(map_http_error(err)),

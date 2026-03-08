@@ -66,6 +66,7 @@ pub struct LaunchAuthContext {
 pub fn render(
     ui: &mut Ui,
     screen: AppScreen,
+    skin_manager_opened: bool,
     selected_instance_id: Option<&str>,
     active_username: Option<&str>,
     active_launch_auth: Option<&LaunchAuthContext>,
@@ -107,6 +108,7 @@ pub fn render(
                 text_ui,
                 selected_instance_id,
                 active_launch_auth,
+                skin_manager_opened,
                 wgpu_target_format,
                 skin_preview_msaa_samples,
                 config.skin_preview_aa_mode(),

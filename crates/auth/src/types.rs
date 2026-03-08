@@ -77,6 +77,8 @@ pub struct CachedAccount {
     #[serde(default)]
     pub minecraft_access_token: Option<String>,
     #[serde(default)]
+    pub microsoft_refresh_token: Option<String>,
+    #[serde(default)]
     pub xuid: Option<String>,
     #[serde(default)]
     pub user_type: Option<String>,

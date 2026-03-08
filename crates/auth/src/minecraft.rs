@@ -21,6 +21,7 @@ use crate::util::{decode_base64, encode_base64, unix_now_secs};
 pub(crate) fn complete_minecraft_login(
     agent: &ureq::Agent,
     microsoft_access_token: &str,
+    microsoft_refresh_token: Option<&str>,
 ) -> Result<CachedAccount, AuthError> {
     debug!(
         target: "vertexlauncher/auth/minecraft",
@@ -51,6 +52,7 @@ pub(crate) fn complete_minecraft_login(
         agent,
         profile,
         minecraft_token.as_str(),
+        microsoft_refresh_token,
     ))
 }
 
@@ -240,7 +242,7 @@ pub(crate) fn upload_profile_skin(
     minecraft_access_token: &str,
     skin_png_bytes: &[u8],
     variant: MinecraftSkinVariant,
-) -> Result<(), AuthError> {
+) -> Result<MinecraftProfileState, AuthError> {
     let boundary = format!("----vertexlauncher-{}", unix_now_secs());
     let mut body = Vec::with_capacity(skin_png_bytes.len() + 512);
     body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
@@ -267,7 +269,7 @@ pub(crate) fn upload_profile_skin(
         .send_bytes(&body);
 
     match response {
-        Ok(_) => Ok(()),
+        Ok(ok) => parse_mutation_profile_response(agent, minecraft_access_token, ok, "upload skin"),
         Err(err) => Err(map_http_error(err)),
     }
 }
@@ -276,15 +278,43 @@ pub(crate) fn set_active_profile_cape(
     agent: &ureq::Agent,
     minecraft_access_token: &str,
     cape_id: &str,
-) -> Result<(), AuthError> {
-    let response = agent
+) -> Result<MinecraftProfileState, AuthError> {
+    let put_response = agent
         .put(MINECRAFT_PROFILE_CAPE_ACTIVE_URL)
         .set("Accept", "application/json")
         .set("Authorization", &format!("Bearer {minecraft_access_token}"))
         .send_json(json!({ "capeId": cape_id }));
 
-    match response {
-        Ok(_) => Ok(()),
+    match put_response {
+        Ok(ok) => {
+            parse_mutation_profile_response(agent, minecraft_access_token, ok, "set active cape")
+        }
+        Err(ureq::Error::Status(code, response)) if matches!(code, 401 | 404 | 405) => {
+            warn!(
+                target: "vertexlauncher/auth/minecraft",
+                status = code,
+                "PUT cape activation failed; retrying with POST compatibility fallback"
+            );
+            let first_error = map_http_error(ureq::Error::Status(code, response)).to_string();
+            let post_response = agent
+                .request("POST", MINECRAFT_PROFILE_CAPE_ACTIVE_URL)
+                .set("Accept", "application/json")
+                .set("Authorization", &format!("Bearer {minecraft_access_token}"))
+                .send_json(json!({ "capeId": cape_id }));
+
+            match post_response {
+                Ok(ok) => parse_mutation_profile_response(
+                    agent,
+                    minecraft_access_token,
+                    ok,
+                    "set active cape",
+                ),
+                Err(err) => Err(AuthError::Http(format!(
+                    "cape activation failed on both PUT and POST. put error: {first_error}; post error: {}",
+                    map_http_error(err)
+                ))),
+            }
+        }
         Err(err) => Err(map_http_error(err)),
     }
 }
@@ -292,7 +322,7 @@ pub(crate) fn set_active_profile_cape(
 pub(crate) fn clear_active_profile_cape(
     agent: &ureq::Agent,
     minecraft_access_token: &str,
-) -> Result<(), AuthError> {
+) -> Result<MinecraftProfileState, AuthError> {
     let response = agent
         .delete(MINECRAFT_PROFILE_CAPE_ACTIVE_URL)
         .set("Accept", "application/json")
@@ -300,8 +330,42 @@ pub(crate) fn clear_active_profile_cape(
         .call();
 
     match response {
-        Ok(_) => Ok(()),
+        Ok(ok) => {
+            parse_mutation_profile_response(agent, minecraft_access_token, ok, "clear active cape")
+        }
         Err(err) => Err(map_http_error(err)),
+    }
+}
+
+fn parse_mutation_profile_response(
+    agent: &ureq::Agent,
+    minecraft_access_token: &str,
+    response: ureq::Response,
+    op: &str,
+) -> Result<MinecraftProfileState, AuthError> {
+    let raw = response.into_string()?;
+    if raw.trim().is_empty() {
+        debug!(
+            target: "vertexlauncher/auth/minecraft",
+            operation = op,
+            "profile mutation response body was empty; falling back to profile fetch"
+        );
+        let profile = fetch_minecraft_profile(agent, minecraft_access_token)?;
+        return Ok(build_profile_state_from_response(agent, profile));
+    }
+
+    match serde_json::from_str::<MinecraftProfileResponse>(&raw) {
+        Ok(profile) => Ok(build_profile_state_from_response(agent, profile)),
+        Err(err) => {
+            warn!(
+                target: "vertexlauncher/auth/minecraft",
+                operation = op,
+                parse_error = %err,
+                "failed to parse profile mutation response; falling back to profile fetch"
+            );
+            let profile = fetch_minecraft_profile(agent, minecraft_access_token)?;
+            Ok(build_profile_state_from_response(agent, profile))
+        }
     }
 }
 
@@ -309,6 +373,7 @@ fn build_cached_account(
     agent: &ureq::Agent,
     profile: MinecraftProfileResponse,
     minecraft_access_token: &str,
+    microsoft_refresh_token: Option<&str>,
 ) -> CachedAccount {
     let minecraft_profile = build_profile_state_from_response(agent, profile);
 
@@ -317,6 +382,7 @@ fn build_cached_account(
     CachedAccount {
         minecraft_profile,
         minecraft_access_token: Some(minecraft_access_token.to_owned()),
+        microsoft_refresh_token: microsoft_refresh_token.map(str::to_owned),
         xuid: None,
         user_type: Some("msa".to_owned()),
         avatar_png_base64,
