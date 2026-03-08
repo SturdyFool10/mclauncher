@@ -35,6 +35,7 @@ pub fn render(
     _selected_instance_id: Option<&str>,
     active_launch_auth: Option<&LaunchAuthContext>,
     skin_manager_opened: bool,
+    skin_manager_account_switched: bool,
     wgpu_target_format: Option<wgpu::TextureFormat>,
     skin_preview_msaa_samples: u32,
     preview_aa_mode: SkinPreviewAaMode,
@@ -51,6 +52,13 @@ pub fn render(
         tracing::info!(
             target: "vertexlauncher/skins",
             "Skin manager opened; queuing active profile refresh."
+        );
+    }
+    if skin_manager_account_switched {
+        state.refresh_on_open_pending = true;
+        tracing::info!(
+            target: "vertexlauncher/skins",
+            "Active account changed while skin manager is open; queuing profile refresh."
         );
     }
     state.wgpu_target_format = wgpu_target_format;
@@ -2806,7 +2814,7 @@ impl SkinManagerState {
             self.active_player_name = Some(auth.player_name.clone());
             tracing::info!(
                 target: "vertexlauncher/skins",
-                profile = %redact_profile_id(normalized_profile_id.as_str()),
+                display_name = auth.player_name.as_str(),
                 token_changed,
                 name_changed,
                 "Updated skin manager auth context for active profile."
@@ -2936,8 +2944,7 @@ impl SkinManagerState {
                                 if self.active_profile_id.as_deref() != Some(profile_id.as_str()) {
                                     tracing::info!(
                                         target: "vertexlauncher/skins",
-                                        active_profile = %redact_profile_id(self.active_profile_id.as_deref().unwrap_or_default()),
-                                        worker_profile = %redact_profile_id(profile_id.as_str()),
+                                        display_name = self.active_player_name.as_deref().unwrap_or("unknown"),
                                         "Ignoring refresh result for non-active profile."
                                     );
                                     keep_rx = false;
@@ -2977,8 +2984,7 @@ impl SkinManagerState {
                                 if self.active_profile_id.as_deref() != Some(profile_id.as_str()) {
                                     tracing::info!(
                                         target: "vertexlauncher/skins",
-                                        active_profile = %redact_profile_id(self.active_profile_id.as_deref().unwrap_or_default()),
-                                        worker_profile = %redact_profile_id(profile_id.as_str()),
+                                        display_name = self.active_player_name.as_deref().unwrap_or("unknown"),
                                         "Ignoring save result for non-active profile."
                                     );
                                     keep_rx = false;
@@ -3197,16 +3203,22 @@ impl SkinManagerState {
 
         tracing::info!(
             target: "vertexlauncher/skins",
-            profile = %redact_profile_id(profile_id.as_str()),
+            display_name = self.active_player_name.as_deref().unwrap_or("unknown"),
             "Starting skin manager profile refresh."
         );
         self.refresh_in_progress = true;
         let (tx, rx) = mpsc::channel();
         self.worker_rx = Some(Arc::new(Mutex::new(rx)));
         let profile_id_for_result = profile_id.clone();
+        let display_name_for_log = self
+            .active_player_name
+            .clone()
+            .unwrap_or_else(|| "unknown".to_owned());
         std::thread::spawn(move || {
-            let result = std::panic::catch_unwind(|| fetch_and_cache_profile(profile_id, &token))
-                .unwrap_or_else(|_| Err("Skin profile refresh task panicked.".to_owned()));
+            let result = std::panic::catch_unwind(|| {
+                fetch_and_cache_profile(profile_id, &token, display_name_for_log.as_str())
+            })
+            .unwrap_or_else(|_| Err("Skin profile refresh task panicked.".to_owned()));
             let _ = tx.send(WorkerEvent::Refreshed(
                 result.map(|loaded| (profile_id_for_result, loaded)),
             ));
@@ -3274,7 +3286,7 @@ impl SkinManagerState {
         let initial_cape = self.initial_cape_id.clone();
         tracing::info!(
             target: "vertexlauncher/skins",
-            profile = %redact_profile_id(profile_id.as_str()),
+            display_name = self.active_player_name.as_deref().unwrap_or("unknown"),
             has_skin_change = pending_skin.is_some(),
             skin_variant = pending_variant.as_api_str(),
             cape_changed = pending_cape != initial_cape,
@@ -3284,6 +3296,10 @@ impl SkinManagerState {
         let (tx, rx) = mpsc::channel();
         self.worker_rx = Some(Arc::new(Mutex::new(rx)));
         let profile_id_for_result = profile_id.clone();
+        let display_name_for_log = self
+            .active_player_name
+            .clone()
+            .unwrap_or_else(|| "unknown".to_owned());
 
         std::thread::spawn(move || {
             let result = std::panic::catch_unwind(|| -> Result<LoadedProfile, String> {
@@ -3291,7 +3307,7 @@ impl SkinManagerState {
                 if let Some(bytes) = pending_skin.as_deref() {
                     tracing::info!(
                         target: "vertexlauncher/skins",
-                        profile = %redact_profile_id(profile_id.as_str()),
+                        display_name = display_name_for_log.as_str(),
                         png_bytes = bytes.len(),
                         variant = pending_variant.as_api_str(),
                         "Uploading skin to Mojang profile API."
@@ -3302,7 +3318,7 @@ impl SkinManagerState {
                     );
                     tracing::info!(
                         target: "vertexlauncher/skins",
-                        profile = %redact_profile_id(profile_id.as_str()),
+                        display_name = display_name_for_log.as_str(),
                         "Skin upload completed."
                     );
                 }
@@ -3311,7 +3327,7 @@ impl SkinManagerState {
                     if let Some(cape_id) = pending_cape.as_deref() {
                         tracing::info!(
                             target: "vertexlauncher/skins",
-                            profile = %redact_profile_id(profile_id.as_str()),
+                            display_name = display_name_for_log.as_str(),
                             cape_id_present = !cape_id.is_empty(),
                             "Setting active cape via Mojang profile API."
                         );
@@ -3321,13 +3337,13 @@ impl SkinManagerState {
                         );
                         tracing::info!(
                             target: "vertexlauncher/skins",
-                            profile = %redact_profile_id(profile_id.as_str()),
+                            display_name = display_name_for_log.as_str(),
                             "Cape activation completed."
                         );
                     } else {
                         tracing::info!(
                             target: "vertexlauncher/skins",
-                            profile = %redact_profile_id(profile_id.as_str()),
+                            display_name = display_name_for_log.as_str(),
                             "Clearing active cape via Mojang profile API."
                         );
                         latest_profile = Some(
@@ -3336,7 +3352,7 @@ impl SkinManagerState {
                         );
                         tracing::info!(
                             target: "vertexlauncher/skins",
-                            profile = %redact_profile_id(profile_id.as_str()),
+                            display_name = display_name_for_log.as_str(),
                             "Cape clear completed."
                         );
                     }
@@ -3345,15 +3361,19 @@ impl SkinManagerState {
                 if let Some(profile) = latest_profile {
                     tracing::info!(
                         target: "vertexlauncher/skins",
-                        profile = %redact_profile_id(profile_id.as_str()),
+                        display_name = display_name_for_log.as_str(),
                         skins = profile.skins.len(),
                         capes = profile.capes.len(),
                         "Using profile payload returned by Mojang mutation endpoint."
                     );
-                    update_cached_profile(profile_id.as_str(), &profile)?;
+                    update_cached_profile(
+                        profile_id.as_str(),
+                        &profile,
+                        display_name_for_log.as_str(),
+                    )?;
                     Ok(LoadedProfile::from_profile(profile))
                 } else {
-                    fetch_and_cache_profile(profile_id, &token)
+                    fetch_and_cache_profile(profile_id, &token, display_name_for_log.as_str())
                 }
             })
             .unwrap_or_else(|_| Err("Skin save task panicked.".to_owned()));
@@ -3430,29 +3450,34 @@ enum WorkerEvent {
 fn fetch_and_cache_profile(
     profile_id: String,
     access_token: &str,
+    display_name: &str,
 ) -> Result<LoadedProfile, String> {
     tracing::info!(
         target: "vertexlauncher/skins",
-        profile = %redact_profile_id(profile_id.as_str()),
+        display_name,
         "Fetching latest skin profile."
     );
     let profile = auth::fetch_minecraft_profile(access_token)
         .map_err(|err| format!("Failed to fetch latest profile: {err}"))?;
     tracing::info!(
         target: "vertexlauncher/skins",
-        profile = %redact_profile_id(profile_id.as_str()),
+        display_name,
         skins = profile.skins.len(),
         capes = profile.capes.len(),
         "Fetched latest skin profile."
     );
-    update_cached_profile(profile_id.as_str(), &profile)?;
+    update_cached_profile(profile_id.as_str(), &profile, display_name)?;
     Ok(LoadedProfile::from_profile(profile))
 }
 
-fn update_cached_profile(profile_id: &str, profile: &MinecraftProfileState) -> Result<(), String> {
+fn update_cached_profile(
+    profile_id: &str,
+    profile: &MinecraftProfileState,
+    display_name: &str,
+) -> Result<(), String> {
     tracing::info!(
         target: "vertexlauncher/skins",
-        profile = %redact_profile_id(profile_id),
+        display_name,
         "Updating cached account profile snapshot."
     );
     let mut cache =
@@ -3479,27 +3504,18 @@ fn update_cached_profile(profile_id: &str, profile: &MinecraftProfileState) -> R
         auth::save_cached_accounts(&cache).map_err(|err| format!("Cache write failed: {err}"))?;
         tracing::info!(
             target: "vertexlauncher/skins",
-            profile = %redact_profile_id(profile_id),
+            display_name,
             "Cached account profile snapshot updated."
         );
     } else {
         tracing::info!(
             target: "vertexlauncher/skins",
-            profile = %redact_profile_id(profile_id),
+            display_name,
             "No matching cached account found to update."
         );
     }
 
     Ok(())
-}
-
-fn redact_profile_id(profile_id: &str) -> String {
-    let trimmed = profile_id.trim();
-    if trimmed.is_empty() {
-        return "unknown".to_owned();
-    }
-    let prefix: String = trimmed.chars().take(8).collect();
-    format!("{prefix}...")
 }
 
 fn format_auth_error(operation: &str, err: &auth::AuthError) -> String {

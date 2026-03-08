@@ -186,6 +186,7 @@ impl AuthState {
             return;
         }
 
+        self.ensure_active_account_token_ready();
         self.active_avatar_png = self
             .accounts_state
             .active_account()
@@ -214,6 +215,54 @@ impl AuthState {
             self.status = AuthUiStatus::Error(format!(
                 "Removed account in memory, but failed to cache account state: {err}",
             ));
+        }
+    }
+
+    fn ensure_active_account_token_ready(&mut self) {
+        let has_active_minecraft_token = self
+            .accounts_state
+            .active_account()
+            .and_then(|account| account.minecraft_access_token.as_deref())
+            .map(str::trim)
+            .is_some_and(|token| !token.is_empty());
+        if has_active_minecraft_token {
+            return;
+        }
+
+        let client_id = match microsoft_client_id() {
+            Ok(client_id) => client_id,
+            Err(err) => {
+                self.status = AuthUiStatus::Error(format!(
+                    "Active account token is missing and renewal is unavailable: {err}",
+                ));
+                return;
+            }
+        };
+
+        match auth::renew_cached_accounts_tokens(&client_id) {
+            Ok(renewed) => {
+                let previous_active = self.accounts_state.active_profile_id.clone();
+                self.accounts_state = renewed;
+                if let Some(active_id) = previous_active.as_deref() {
+                    let _ = self.accounts_state.set_active_profile_id(active_id);
+                }
+                let refreshed_has_token = self
+                    .accounts_state
+                    .active_account()
+                    .and_then(|account| account.minecraft_access_token.as_deref())
+                    .map(str::trim)
+                    .is_some_and(|token| !token.is_empty());
+                if !refreshed_has_token {
+                    self.status = AuthUiStatus::Error(
+                        "Active account does not have a renewable session. Sign in again."
+                            .to_owned(),
+                    );
+                }
+            }
+            Err(err) => {
+                self.status =
+                    AuthUiStatus::Error(format!("Failed to renew active account token: {err}",));
+            }
         }
     }
 

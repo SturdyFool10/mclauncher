@@ -285,14 +285,27 @@ impl eframe::App for VertexApp {
         if top_bar_output.start_sign_in {
             self.auth.start_sign_in();
         }
+        let mut account_switched = false;
         if let Some(profile_id) = top_bar_output.select_account_id.as_deref() {
             self.auth.select_account(profile_id);
+            account_switched = true;
         }
         if let Some(profile_id) = top_bar_output.remove_account_id.as_deref() {
             self.auth.remove_account(profile_id);
         }
         if top_bar_output.open_active_user_terminal {
             self.active_screen = screens::AppScreen::Console;
+            let active_launch_auth =
+                self.auth
+                    .active_launch_context()
+                    .map(|context| screens::LaunchAuthContext {
+                        account_key: context.account_key,
+                        player_name: context.player_name,
+                        player_uuid: context.player_uuid,
+                        access_token: context.access_token,
+                        xuid: context.xuid,
+                        user_type: context.user_type,
+                    });
             let _ = console::activate_tab_for_user(
                 active_launch_auth
                     .as_ref()
@@ -320,6 +333,19 @@ impl eframe::App for VertexApp {
         let skin_preview_msaa_samples = 4;
         let skin_manager_opened = self.active_screen == screens::AppScreen::Skins
             && self.last_rendered_screen != Some(screens::AppScreen::Skins);
+        let skin_manager_account_switched =
+            self.active_screen == screens::AppScreen::Skins && account_switched;
+        let active_launch_auth =
+            self.auth
+                .active_launch_context()
+                .map(|context| screens::LaunchAuthContext {
+                    account_key: context.account_key,
+                    player_name: context.player_name,
+                    player_uuid: context.player_uuid,
+                    access_token: context.access_token,
+                    xuid: context.xuid,
+                    user_type: context.user_type,
+                });
         CentralPanel::default()
             .frame(
                 egui::Frame::new()
@@ -336,6 +362,7 @@ impl eframe::App for VertexApp {
                     ui,
                     self.active_screen,
                     skin_manager_opened,
+                    skin_manager_account_switched,
                     self.selected_instance_id.as_deref(),
                     self.auth.display_name(),
                     active_launch_auth.as_ref(),
