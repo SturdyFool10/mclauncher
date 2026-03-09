@@ -3,7 +3,10 @@ use std::hash::Hash;
 use egui::{self, Align, Layout, Response, Sense, Ui};
 use textui::{ButtonOptions, InputOptions, LabelOptions, TextUi, TooltipOptions};
 
-use crate::{assets, ui::components::icon_button};
+use crate::{
+    assets,
+    ui::components::{icon_button, text_helpers},
+};
 
 #[derive(Clone, Copy, Debug)]
 struct ControlMetrics {
@@ -830,7 +833,7 @@ fn dropdown(
     label_style.wrap = false;
 
     let selected_text_raw = options.get(*selected_index).copied().unwrap_or("Select...");
-    let selected_text = truncate_button_text_with_ellipsis(
+    let selected_text = text_helpers::truncate_single_line_text_with_ellipsis(
         text_ui,
         ui,
         selected_text_raw,
@@ -1156,54 +1159,6 @@ fn dropdown_text_budget(metrics: ControlMetrics) -> f32 {
     let right_padding = 8.0;
     let icon_gap = 6.0;
     (metrics.dropdown_width - metrics.icon_size - left_padding - right_padding - icon_gap).max(0.0)
-}
-
-fn truncate_button_text_with_ellipsis(
-    text_ui: &mut TextUi,
-    ui: &Ui,
-    text: &str,
-    max_width: f32,
-    label_options: &LabelOptions,
-) -> String {
-    if text.is_empty() {
-        return String::new();
-    }
-
-    if max_width <= 0.0 {
-        return "...".to_owned();
-    }
-
-    let mut measure_width =
-        |candidate: &str| -> f32 { text_ui.measure_text_size(ui, candidate, label_options).x };
-
-    if measure_width(text) <= max_width {
-        return text.to_owned();
-    }
-
-    let ellipsis = "...";
-    if measure_width(ellipsis) > max_width {
-        return String::new();
-    }
-
-    let mut cutoff = 0usize;
-    for (index, _) in text
-        .char_indices()
-        .skip(1)
-        .chain(std::iter::once((text.len(), '\0')))
-    {
-        let candidate = format!("{}{}", &text[..index], ellipsis);
-        if measure_width(&candidate) <= max_width {
-            cutoff = index;
-        } else {
-            break;
-        }
-    }
-
-    if cutoff == 0 {
-        ellipsis.to_owned()
-    } else {
-        format!("{}{}", &text[..cutoff], ellipsis)
-    }
 }
 
 fn themed_svg_image(

@@ -14,19 +14,20 @@ use installation::{
 use instances::{InstanceStore, set_instance_settings, set_instance_versions};
 use modprovider::{ContentSource, UnifiedContentEntry, search_minecraft_content};
 use modrinth::Client as ModrinthClient;
-use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::hash::{Hash, Hasher};
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock, mpsc};
-use std::time::{Duration, Instant};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet, hash_map::DefaultHasher},
+    hash::{Hash, Hasher},
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, OnceLock, mpsc},
+    time::{Duration, Instant},
+};
 use textui::{ButtonOptions, LabelOptions, TextUi, TooltipOptions};
 
 use crate::app::tokio_runtime;
 use crate::screens::content_browser::InstalledContentIdentity;
 use crate::screens::{AppScreen, LaunchAuthContext};
 use crate::ui::{
-    components::{icon_button, remote_tiled_image, settings_widgets},
+    components::{icon_button, remote_tiled_image, settings_widgets, text_helpers},
     style,
 };
 use crate::{assets, console, install_activity, notification};
@@ -759,7 +760,7 @@ fn render_installed_content_entry(
                                                     ..LabelOptions::default()
                                                 };
                                                 let truncated_description =
-                                                    truncate_single_line_text_with_ellipsis(
+                                                    text_helpers::truncate_single_line_text_with_ellipsis(
                                                         text_ui,
                                                         ui,
                                                         description.as_str(),
@@ -809,55 +810,6 @@ fn render_installed_content_entry(
     InstalledEntryRenderResult {
         open_clicked: open_clicked && !delete_clicked,
         delete_clicked,
-    }
-}
-
-fn truncate_single_line_text_with_ellipsis(
-    text_ui: &mut TextUi,
-    ui: &Ui,
-    text: &str,
-    max_width: f32,
-    label_options: &LabelOptions,
-) -> String {
-    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if normalized.is_empty() {
-        return String::new();
-    }
-
-    if max_width <= 0.0 {
-        return "...".to_owned();
-    }
-
-    let mut measure_width =
-        |candidate: &str| -> f32 { text_ui.measure_text_size(ui, candidate, label_options).x };
-
-    if measure_width(normalized.as_str()) <= max_width {
-        return normalized;
-    }
-
-    let ellipsis = "...";
-    if measure_width(ellipsis) > max_width {
-        return String::new();
-    }
-
-    let mut cutoff = 0usize;
-    for (index, _) in normalized
-        .char_indices()
-        .skip(1)
-        .chain(std::iter::once((normalized.len(), '\0')))
-    {
-        let candidate = format!("{}{}", &normalized[..index], ellipsis);
-        if measure_width(candidate.as_str()) <= max_width {
-            cutoff = index;
-        } else {
-            break;
-        }
-    }
-
-    if cutoff == 0 {
-        ellipsis.to_owned()
-    } else {
-        format!("{}{}", &normalized[..cutoff], ellipsis)
     }
 }
 
@@ -1017,7 +969,7 @@ fn normalize_lookup_key(value: &str) -> String {
             }
         })
         .collect::<String>();
-    normalized.split_whitespace().collect::<Vec<_>>().join(" ")
+    text_helpers::normalize_inline_whitespace(normalized.as_str())
 }
 
 fn normalize_installed_content_path_key(value: &str) -> String {

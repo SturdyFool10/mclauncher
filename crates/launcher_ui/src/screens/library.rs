@@ -1,9 +1,10 @@
-use std::collections::hash_map::DefaultHasher;
-use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, mpsc};
-use std::time::Duration;
+use std::{
+    collections::{HashMap, HashSet, hash_map::DefaultHasher},
+    hash::{Hash, Hasher},
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, mpsc},
+    time::Duration,
+};
 
 use config::{Config, JavaRuntimeVersion};
 use egui::Ui;
@@ -634,6 +635,7 @@ fn render_delete_instance_modal(
 
     egui::Window::new("Delete Instance")
         .id(egui::Id::new("library_delete_instance_modal"))
+        .order(egui::Order::Foreground)
         .fixed_pos(modal_pos)
         .fixed_size(modal_size)
         .title_bar(false)

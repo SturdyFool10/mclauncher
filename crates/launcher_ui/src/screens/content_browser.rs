@@ -6,17 +6,19 @@ use instances::{InstanceStore, instance_root_path};
 use modprovider::{ContentSource, UnifiedContentEntry};
 use modrinth::Client as ModrinthClient;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::hash::{Hash, Hasher};
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    hash::{Hash, Hasher},
+    io::{Read, Write},
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, OnceLock, mpsc},
+};
 use textui::{LabelOptions, TextUi};
 
 use crate::app::tokio_runtime;
 use crate::assets;
 use crate::notification;
-use crate::ui::components::remote_tiled_image;
+use crate::ui::components::{remote_tiled_image, text_helpers};
 
 use super::AppScreen;
 
@@ -1845,11 +1847,11 @@ fn normalize_lookup_key(value: &str) -> String {
             }
         })
         .collect::<String>();
-    normalized.split_whitespace().collect::<Vec<_>>().join(" ")
+    text_helpers::normalize_inline_whitespace(normalized.as_str())
 }
 
 fn normalize_type_key(value: &str) -> String {
-    value
+    let normalized = value
         .chars()
         .map(|ch| {
             if ch.is_ascii_alphanumeric() {
@@ -1858,10 +1860,8 @@ fn normalize_type_key(value: &str) -> String {
                 ' '
             }
         })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+        .collect::<String>();
+    text_helpers::normalize_inline_whitespace(normalized.as_str())
 }
 
 fn parse_content_type(value: &str) -> Option<BrowserContentType> {
