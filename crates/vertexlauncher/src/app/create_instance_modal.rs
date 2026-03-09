@@ -11,7 +11,10 @@ use installation::{
 use launcher_runtime as tokio_runtime;
 use launcher_ui::{
     assets,
-    ui::components::{icon_button, settings_widgets},
+    ui::{
+        components::{icon_button, settings_widgets},
+        modal,
+    },
 };
 use textui::{LabelOptions, TextUi};
 
@@ -143,13 +146,11 @@ pub fn render(
     );
     let modal_pos = egui::pos2(modal_pos_x, modal_pos_y);
     let modal_size = egui::vec2(modal_max_width, modal_max_height);
-    let window_fill = {
-        let base = ctx.style().visuals.window_fill;
-        egui::Color32::from_rgba_premultiplied(base.r(), base.g(), base.b(), 255)
-    };
+    modal::show_scrim(ctx, "create_instance_modal_scrim", viewport_rect);
 
     egui::Window::new("Create Instance")
         .id(egui::Id::new("create_instance_modal_window"))
+        .order(egui::Order::Foreground)
         .fixed_pos(modal_pos)
         .fixed_size(modal_size)
         .collapsible(false)
@@ -160,16 +161,7 @@ pub fn render(
         .vscroll(true)
         .constrain(true)
         .constrain_to(viewport_rect)
-        .frame(
-            egui::Frame::new()
-                .fill(window_fill)
-                .stroke(egui::Stroke::new(
-                    1.0,
-                    ctx.style().visuals.widgets.hovered.bg_stroke.color,
-                ))
-                .corner_radius(egui::CornerRadius::same(14))
-                .inner_margin(egui::Margin::same(14)),
-        )
+        .frame(modal::window_frame(ctx))
         .show(ctx, |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(MODAL_GAP_MD, MODAL_GAP_MD);
             let text_color = ui.visuals().text_color();

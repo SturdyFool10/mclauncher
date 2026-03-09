@@ -17,7 +17,10 @@ use instances::{InstanceRecord, InstanceStore, delete_instance, instance_root_pa
 use textui::{LabelOptions, TextUi};
 
 use crate::app::tokio_runtime;
-use crate::{assets, notification, ui::style};
+use crate::{
+    assets, notification,
+    ui::{modal, style},
+};
 
 use super::{AppScreen, LaunchAuthContext};
 
@@ -617,21 +620,7 @@ fn render_delete_instance_modal(
     let instance_root = instance_root_path(installations_root, &instance);
     let instance_running = is_instance_running(instance_root.as_path());
     let danger = ctx.style().visuals.error_fg_color;
-    let window_fill = {
-        let base = ctx.style().visuals.window_fill;
-        egui::Color32::from_rgba_premultiplied(base.r(), base.g(), base.b(), 255)
-    };
-
-    egui::Area::new(egui::Id::new("library_delete_instance_modal_scrim"))
-        .order(egui::Order::Foreground)
-        .fixed_pos(viewport_rect.min)
-        .show(ctx, |ui| {
-            ui.painter().rect_filled(
-                viewport_rect,
-                egui::CornerRadius::ZERO,
-                egui::Color32::from_rgba_premultiplied(0, 0, 0, 160),
-            );
-        });
+    modal::show_scrim(ctx, "library_delete_instance_modal_scrim", viewport_rect);
 
     egui::Window::new("Delete Instance")
         .id(egui::Id::new("library_delete_instance_modal"))
@@ -644,16 +633,7 @@ fn render_delete_instance_modal(
         .movable(false)
         .constrain(true)
         .constrain_to(viewport_rect)
-        .frame(
-            egui::Frame::new()
-                .fill(window_fill)
-                .stroke(egui::Stroke::new(
-                    1.0,
-                    ctx.style().visuals.widgets.hovered.bg_stroke.color,
-                ))
-                .corner_radius(egui::CornerRadius::same(14))
-                .inner_margin(egui::Margin::same(14)),
-        )
+        .frame(modal::window_frame(ctx))
         .show(ctx, |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(style::SPACE_MD, style::SPACE_MD);
 

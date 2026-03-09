@@ -1,5 +1,6 @@
 use config::ConfigFormat;
 use eframe::egui;
+use launcher_ui::ui::modal;
 use textui::{ButtonOptions, LabelOptions, TextUi};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -18,25 +19,18 @@ pub fn render(
     let mut action = ModalAction::None;
     let viewport_rect = ctx.input(|i| i.content_rect());
     let modal_width = (viewport_rect.width() * 0.42).clamp(420.0, 560.0);
+    modal::show_scrim(ctx, "config_format_modal_scrim", viewport_rect);
 
     egui::Window::new("Config format")
         .id(egui::Id::new("config_format_modal_window"))
+        .order(egui::Order::Foreground)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
         .default_width(modal_width)
         .collapsible(false)
         .resizable(false)
         .movable(false)
         .title_bar(false)
-        .frame(
-            egui::Frame::new()
-                .fill(ctx.style().visuals.window_fill)
-                .stroke(egui::Stroke::new(
-                    1.0,
-                    ctx.style().visuals.widgets.hovered.bg_stroke.color,
-                ))
-                .corner_radius(egui::CornerRadius::same(14))
-                .inner_margin(egui::Margin::same(14)),
-        )
+        .frame(modal::window_frame(ctx))
         .show(ctx, |ui| {
             ui.set_min_width(modal_width);
             ui.set_max_width(modal_width);

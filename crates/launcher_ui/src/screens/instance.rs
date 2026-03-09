@@ -28,7 +28,7 @@ use crate::screens::content_browser::InstalledContentIdentity;
 use crate::screens::{AppScreen, LaunchAuthContext};
 use crate::ui::{
     components::{icon_button, remote_tiled_image, settings_widgets, text_helpers},
-    style,
+    modal, style,
 };
 use crate::{assets, console, install_activity, notification};
 
@@ -1086,14 +1086,16 @@ fn render_instance_settings_modal(
         .clamp(viewport_rect.top(), viewport_rect.bottom() - modal_height);
     let modal_pos = egui::pos2(modal_pos_x, modal_pos_y);
     let modal_size = egui::vec2(modal_width, modal_height);
-    let window_fill = {
-        let base = ctx.style().visuals.window_fill;
-        egui::Color32::from_rgba_premultiplied(base.r(), base.g(), base.b(), 255)
-    };
     let mut close_requested = false;
+    modal::show_scrim(
+        ctx,
+        ("instance_settings_modal_scrim", instance_id),
+        viewport_rect,
+    );
 
     egui::Window::new("Instance Settings")
         .id(egui::Id::new(("instance_settings_modal", instance_id)))
+        .order(egui::Order::Foreground)
         .open(&mut open)
         .fixed_pos(modal_pos)
         .fixed_size(modal_size)
@@ -1105,16 +1107,7 @@ fn render_instance_settings_modal(
         .vscroll(false)
         .constrain(true)
         .constrain_to(viewport_rect)
-        .frame(
-            egui::Frame::new()
-                .fill(window_fill)
-                .stroke(egui::Stroke::new(
-                    1.0,
-                    ctx.style().visuals.widgets.hovered.bg_stroke.color,
-                ))
-                .corner_radius(egui::CornerRadius::same(14))
-                .inner_margin(egui::Margin::same(14)),
-        )
+        .frame(modal::window_frame(ctx))
         .show(ctx, |ui| {
             let text_color = ui.visuals().text_color();
             let mut muted_style = LabelOptions::default();

@@ -1,4 +1,5 @@
 pub mod components;
+pub mod modal;
 pub mod motion;
 pub mod sidebar;
 pub mod style;
