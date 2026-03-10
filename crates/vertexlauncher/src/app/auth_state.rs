@@ -157,11 +157,16 @@ impl AuthState {
                     } else {
                         "Loaded cached accounts, but token renewal failed"
                     };
+                    notification::error!("auth", "{prefix}: {err}");
                     self.status = AuthUiStatus::Error(format!("{prefix}: {err}"));
                     self.renewal = None;
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
                 Err(mpsc::TryRecvError::Disconnected) => {
+                    notification::error!(
+                        "auth",
+                        "Loaded cached accounts, but token renewal worker stopped unexpectedly."
+                    );
                     self.status = AuthUiStatus::Error(
                         "Loaded cached accounts, but token renewal worker stopped unexpectedly."
                             .to_owned(),
@@ -193,6 +198,10 @@ impl AuthState {
                         self.status = AuthUiStatus::Idle;
 
                         if let Err(err) = auth::save_cached_accounts(&self.accounts_state) {
+                            notification::error!(
+                                "auth",
+                                "Sign-in succeeded, but failed to cache account state: {err}"
+                            );
                             self.status = AuthUiStatus::Error(format!(
                                 "Sign-in succeeded, but failed to cache account state: {err}",
                             ));
@@ -202,6 +211,7 @@ impl AuthState {
                         self.schedule_missing_avatars();
                     }
                     AuthFlowEvent::Failed(err) => {
+                        notification::error!("auth", "{err}");
                         self.status = AuthUiStatus::Error(err);
                         flow_finished = true;
                     }
@@ -209,6 +219,10 @@ impl AuthState {
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
                     if !flow_finished {
+                        notification::error!(
+                            "auth",
+                            "Sign-in stopped unexpectedly before completion"
+                        );
                         self.status = AuthUiStatus::Error(
                             "Sign-in stopped unexpectedly before completion".to_owned(),
                         );
@@ -259,6 +273,10 @@ impl AuthState {
         }
 
         if let Err(err) = auth::save_cached_accounts(&self.accounts_state) {
+            notification::error!(
+                "auth",
+                "Switched account in memory, but failed to cache account state: {err}"
+            );
             self.status = AuthUiStatus::Error(format!(
                 "Switched account in memory, but failed to cache account state: {err}",
             ));
@@ -275,6 +293,10 @@ impl AuthState {
         self.status = AuthUiStatus::Idle;
 
         if let Err(err) = auth::save_cached_accounts(&self.accounts_state) {
+            notification::error!(
+                "auth",
+                "Removed account in memory, but failed to cache account state: {err}"
+            );
             self.status = AuthUiStatus::Error(format!(
                 "Removed account in memory, but failed to cache account state: {err}",
             ));
@@ -295,6 +317,10 @@ impl AuthState {
         let client_id = match microsoft_client_id() {
             Ok(client_id) => client_id,
             Err(err) => {
+                notification::error!(
+                    "auth",
+                    "Active account token is missing and renewal is unavailable: {err}"
+                );
                 self.status = AuthUiStatus::Error(format!(
                     "Active account token is missing and renewal is unavailable: {err}",
                 ));
@@ -326,6 +352,9 @@ impl AuthState {
     }
 
     pub fn display_name(&self) -> Option<&str> {
+        if !self.has_active_authenticated_session() {
+            return None;
+        }
         self.accounts_state
             .active_account()
             .map(|account| account.minecraft_profile.name.as_str())
@@ -336,6 +365,9 @@ impl AuthState {
     }
 
     pub fn active_launch_context(&self) -> Option<LaunchAuthContext> {
+        if !self.has_active_authenticated_session() {
+            return None;
+        }
         let account = self.accounts_state.active_account()?;
         let access_token = account
             .minecraft_access_token
@@ -372,6 +404,9 @@ impl AuthState {
     }
 
     pub fn avatar_png(&self) -> Option<&[u8]> {
+        if !self.has_active_authenticated_session() {
+            return None;
+        }
         self.active_avatar_png.as_deref()
     }
 
@@ -512,6 +547,10 @@ impl AuthState {
                             error,
                             "Failed to resolve account avatar in background worker."
                         );
+                        notification::warn!(
+                            "auth/avatar",
+                            "Failed to resolve account avatar in background worker: {error}"
+                        );
                         continue;
                     }
 
@@ -536,12 +575,29 @@ impl AuthState {
                             error = %err,
                             "Failed to persist background-loaded avatar."
                         );
+                        notification::warn!(
+                            "auth/avatar",
+                            "Failed to persist background-loaded avatar: {err}"
+                        );
                     }
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => break,
             }
         }
+    }
+}
+
+impl AuthState {
+    fn has_active_authenticated_session(&self) -> bool {
+        if matches!(self.status, AuthUiStatus::Error(_)) {
+            return false;
+        }
+        self.accounts_state
+            .active_account()
+            .and_then(|account| account.minecraft_access_token.as_deref())
+            .map(str::trim)
+            .is_some_and(|token| !token.is_empty())
     }
 }
 
@@ -608,7 +664,9 @@ fn emit_cached_account_renewal_notification(event: CachedAccountRenewalEvent, st
             notification::emit_replace(
                 notification::Severity::Error,
                 "Login Renewal",
-                format!("Error in attepting to renew login for {display_name_for_notification}"),
+                format!(
+                    "Error in attepting to renew login for {display_name_for_notification}: {error}"
+                ),
                 renewal_replace_key(&profile_id),
             );
         }

@@ -1,5 +1,4 @@
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
@@ -16,98 +15,32 @@ fn fs_read_to_string(path: impl AsRef<Path>) -> Result<String, AuthError> {
 }
 
 #[track_caller]
-fn fs_read(path: impl AsRef<Path>) -> Result<Vec<u8>, AuthError> {
-    let path = path.as_ref();
-    tracing::debug!(target: "vertexlauncher/io", op = "read", path = %path.display());
-    Ok(fs::read(path)?)
-}
-
-#[track_caller]
 fn fs_remove_file(path: impl AsRef<Path>) -> Result<(), AuthError> {
     let path = path.as_ref();
     tracing::debug!(target: "vertexlauncher/io", op = "remove_file", path = %path.display());
     Ok(fs::remove_file(path)?)
 }
 
-#[track_caller]
-fn fs_create_dir_all(path: impl AsRef<Path>) -> Result<(), AuthError> {
-    let path = path.as_ref();
-    tracing::debug!(target: "vertexlauncher/io", op = "create_dir_all", path = %path.display());
-    Ok(fs::create_dir_all(path)?)
-}
-
-#[track_caller]
-fn fs_open_options_create_truncate_write(path: impl AsRef<Path>) -> Result<fs::File, AuthError> {
-    let path = path.as_ref();
-    tracing::debug!(
-        target: "vertexlauncher/io",
-        op = "open_options(create,truncate,write)",
-        path = %path.display()
-    );
-    Ok(fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(path)?)
-}
-
-#[track_caller]
-fn fs_rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> Result<(), AuthError> {
-    let from = from.as_ref();
-    let to = to.as_ref();
-    tracing::debug!(
-        target: "vertexlauncher/io",
-        op = "rename",
-        from = %from.display(),
-        to = %to.display()
-    );
-    Ok(fs::rename(from, to)?)
-}
-
 pub(crate) fn load_cached_accounts() -> Result<CachedAccountsState, AuthError> {
     let path = account_cache_path();
-    maybe_migrate_legacy_account_cache(&path)?;
+    migrate_legacy_disk_cache_to_secure_storage(&path)?;
 
-    if !path.exists() {
-        tracing::debug!(
-            target: "vertexlauncher/auth/cache",
-            path = %path.display(),
-            "account cache file missing; using empty cache"
-        );
-        return Ok(CachedAccountsState::default());
-    }
-
-    let contents = fs_read_to_string(&path)?;
-
-    match serde_json::from_str::<CachedAccountsState>(&contents) {
-        Ok(state) => finalize_loaded_accounts(state.normalize()),
-        Err(state_error) => {
-            // Backward compatibility with the old single-account cache format.
-            if let Ok(single_account) = serde_json::from_str::<CachedAccount>(&contents) {
-                tracing::info!(
-                    target: "vertexlauncher/auth/cache",
-                    "migrated single-account cache format into multi-account state"
-                );
-                let mut state = CachedAccountsState::default();
-                state.upsert_and_activate(single_account);
-                return finalize_loaded_accounts(state);
-            }
-
-            tracing::warn!(
+    match secret_store::load_accounts_state()? {
+        Some(contents) => parse_cached_accounts_state(contents.as_str()),
+        None => {
+            tracing::debug!(
                 target: "vertexlauncher/auth/cache",
-                path = %path.display(),
-                error = %state_error,
-                "failed to parse account cache"
+                "secure cached accounts state missing; using empty cache"
             );
-            Err(AuthError::Json(state_error))
+            Ok(CachedAccountsState::default())
         }
     }
 }
 
 pub(crate) fn save_cached_accounts(state: &CachedAccountsState) -> Result<(), AuthError> {
     let path = account_cache_path();
-    maybe_migrate_legacy_account_cache(&path)?;
-    let previous_profile_ids = load_cached_profile_ids_from_disk(&path)?;
+    migrate_legacy_disk_cache_to_secure_storage(&path)?;
+    let previous_profile_ids = load_cached_profile_ids_from_secure_storage()?;
     let mut normalized = state.clone().normalize();
     let current_profile_ids = normalized
         .accounts
@@ -119,8 +52,12 @@ pub(crate) fn save_cached_accounts(state: &CachedAccountsState) -> Result<(), Au
         persist_refresh_token(account)?;
         sanitize_cached_profile(account);
     }
-    let json = serde_json::to_string_pretty(&normalized)?;
-    write_secure_file_atomic(&path, json.as_bytes())?;
+    let json = serde_json::to_string(&normalized)?;
+    secret_store::store_accounts_state(&json)?;
+
+    if path.exists() {
+        let _ = fs_remove_file(&path);
+    }
 
     for profile_id in previous_profile_ids {
         if !current_profile_ids
@@ -136,12 +73,12 @@ pub(crate) fn save_cached_accounts(state: &CachedAccountsState) -> Result<(), Au
 
 pub(crate) fn clear_cached_accounts() -> Result<(), AuthError> {
     let path = account_cache_path();
-    maybe_migrate_legacy_account_cache(&path)?;
-    let previous_profile_ids = load_cached_profile_ids_from_disk(&path)?;
+    let previous_profile_ids = load_cached_profile_ids_from_secure_storage()?;
 
     if path.exists() {
-        fs_remove_file(path)?;
+        let _ = fs_remove_file(path);
     }
+    secret_store::delete_accounts_state()?;
 
     for profile_id in previous_profile_ids {
         secret_store::delete_refresh_token(&profile_id)?;
@@ -228,59 +165,117 @@ fn default_account_cache_path() -> PathBuf {
     PathBuf::from(ACCOUNT_CACHE_FILENAME)
 }
 
-fn maybe_migrate_legacy_account_cache(target_path: &Path) -> Result<(), AuthError> {
-    let legacy_path = PathBuf::from(LEGACY_ACCOUNT_CACHE_PATH);
-
-    if target_path == legacy_path || target_path.exists() || !legacy_path.exists() {
+fn migrate_legacy_disk_cache_to_secure_storage(target_path: &Path) -> Result<(), AuthError> {
+    if secret_store::load_accounts_state()?.is_some() {
+        remove_legacy_account_cache_file(target_path);
+        remove_legacy_account_cache_file(Path::new(LEGACY_ACCOUNT_CACHE_PATH));
         return Ok(());
     }
 
-    let bytes = fs_read(&legacy_path)?;
-    write_secure_file_atomic(target_path, &bytes)?;
-    fs_remove_file(&legacy_path)?;
+    let Some(state) = load_cached_accounts_state_from_disk(target_path)? else {
+        remove_legacy_account_cache_file(Path::new(LEGACY_ACCOUNT_CACHE_PATH));
+        return Ok(());
+    };
+
+    let mut normalized = state.normalize();
+    for account in &mut normalized.accounts {
+        persist_refresh_token(account)?;
+        sanitize_cached_profile(account);
+    }
+    let serialized = serde_json::to_string(&normalized)?;
+    secret_store::store_accounts_state(&serialized)?;
+
+    remove_legacy_account_cache_file(target_path);
+    remove_legacy_account_cache_file(Path::new(LEGACY_ACCOUNT_CACHE_PATH));
     tracing::info!(
         target: "vertexlauncher/auth/cache",
-        legacy_path = %legacy_path.display(),
-        target_path = %target_path.display(),
-        "migrated legacy account cache path"
+        "migrated cached account metadata from disk into secure storage"
     );
     Ok(())
 }
 
-fn write_secure_file_atomic(path: &Path, bytes: &[u8]) -> Result<(), AuthError> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs_create_dir_all(parent)?;
+fn load_cached_accounts_state_from_disk(
+    path: &Path,
+) -> Result<Option<CachedAccountsState>, AuthError> {
+    let candidate_paths = if path == Path::new(LEGACY_ACCOUNT_CACHE_PATH) {
+        vec![path.to_path_buf()]
+    } else {
+        vec![path.to_path_buf(), PathBuf::from(LEGACY_ACCOUNT_CACHE_PATH)]
+    };
+
+    for candidate in candidate_paths {
+        if !candidate.exists() {
+            continue;
+        }
+        let contents = fs_read_to_string(&candidate)?;
+        if let Ok(state) = serde_json::from_str::<CachedAccountsState>(&contents) {
+            return Ok(Some(state));
+        }
+        if let Ok(single_account) = serde_json::from_str::<CachedAccount>(&contents) {
+            tracing::info!(
+                target: "vertexlauncher/auth/cache",
+                "migrated single-account cache format into multi-account state"
+            );
+            let mut state = CachedAccountsState::default();
+            state.upsert_and_activate(single_account);
+            return Ok(Some(state));
         }
     }
 
-    let temp_path = path.with_extension("tmp");
+    Ok(None)
+}
 
-    {
-        let mut file = fs_open_options_create_truncate_write(&temp_path)?;
+fn remove_legacy_account_cache_file(path: &Path) {
+    if path.exists() {
+        let _ = fs_remove_file(path);
+    }
+}
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+fn parse_cached_accounts_state(contents: &str) -> Result<CachedAccountsState, AuthError> {
+    match serde_json::from_str::<CachedAccountsState>(contents) {
+        Ok(state) => finalize_loaded_accounts(state.normalize()),
+        Err(state_error) => {
+            if let Ok(single_account) = serde_json::from_str::<CachedAccount>(contents) {
+                tracing::info!(
+                    target: "vertexlauncher/auth/cache",
+                    "migrated single-account secure cache format into multi-account state"
+                );
+                let mut state = CachedAccountsState::default();
+                state.upsert_and_activate(single_account);
+                return finalize_loaded_accounts(state);
+            }
+
+            tracing::warn!(
+                target: "vertexlauncher/auth/cache",
+                error = %state_error,
+                "failed to parse secure cached accounts state"
+            );
+            Err(AuthError::Json(state_error))
         }
+    }
+}
 
-        file.write_all(bytes)?;
-        file.flush()?;
-        file.sync_all()?;
+fn load_cached_profile_ids_from_secure_storage() -> Result<Vec<String>, AuthError> {
+    let Some(contents) = secret_store::load_accounts_state()? else {
+        return Ok(Vec::new());
+    };
+    if let Ok(state) = serde_json::from_str::<CachedAccountsState>(&contents) {
+        return Ok(state
+            .accounts
+            .into_iter()
+            .map(|account| account.minecraft_profile.id)
+            .filter(|profile_id| !profile_id.trim().is_empty())
+            .collect());
     }
 
-    #[cfg(windows)]
-    {
-        // Atomic rename over an existing file is not always available on Windows,
-        // so best-effort remove first before rename.
-        if path.exists() {
-            let _ = fs_remove_file(path);
+    if let Ok(account) = serde_json::from_str::<CachedAccount>(&contents) {
+        if account.minecraft_profile.id.trim().is_empty() {
+            return Ok(Vec::new());
         }
+        return Ok(vec![account.minecraft_profile.id]);
     }
 
-    fs_rename(temp_path, path)?;
-    Ok(())
+    Ok(Vec::new())
 }
 
 fn sanitize_cached_profile(account: &mut CachedAccount) {
@@ -367,29 +362,4 @@ fn persist_refresh_token(account: &mut CachedAccount) -> Result<(), AuthError> {
     }
 
     Ok(())
-}
-
-fn load_cached_profile_ids_from_disk(path: &Path) -> Result<Vec<String>, AuthError> {
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-
-    let contents = fs_read_to_string(path)?;
-    if let Ok(state) = serde_json::from_str::<CachedAccountsState>(&contents) {
-        return Ok(state
-            .accounts
-            .into_iter()
-            .map(|account| account.minecraft_profile.id)
-            .filter(|profile_id| !profile_id.trim().is_empty())
-            .collect());
-    }
-
-    if let Ok(account) = serde_json::from_str::<CachedAccount>(&contents) {
-        if account.minecraft_profile.id.trim().is_empty() {
-            return Ok(Vec::new());
-        }
-        return Ok(vec![account.minecraft_profile.id]);
-    }
-
-    Ok(Vec::new())
 }

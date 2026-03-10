@@ -7,4 +7,4 @@ config.toml
 cache
 logs/
 instances.json
-instances/
+/instances/

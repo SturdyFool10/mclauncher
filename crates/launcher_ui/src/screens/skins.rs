@@ -2880,7 +2880,6 @@ impl SkinManagerState {
     fn apply_account_snapshot(&mut self, account: &CachedAccount) {
         self.active_profile_id = Some(account.minecraft_profile.id.to_ascii_lowercase());
         self.active_player_name = Some(account.minecraft_profile.name.clone());
-        self.access_token = account.minecraft_access_token.clone();
 
         // Do not trust cached equipped skin/cape state; always load current equip from Mojang.
         self.base_skin_png = None;

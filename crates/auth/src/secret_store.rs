@@ -2,8 +2,18 @@ use keyring::{Entry, Error as KeyringError};
 
 use crate::error::AuthError;
 
+const ACCOUNTS_STATE_SERVICE: &str = "vertexlauncher.accounts_state.v1";
+const ACCOUNTS_STATE_ACCOUNT: &str = "cached_accounts";
 const REFRESH_TOKEN_SERVICE: &str = "vertexlauncher.microsoft_refresh_token.v2";
 const LEGACY_REFRESH_TOKEN_SERVICE: &str = "vertexlauncher.microsoft_refresh_token";
+
+fn accounts_state_entry() -> Result<Entry, AuthError> {
+    Entry::new(ACCOUNTS_STATE_SERVICE, ACCOUNTS_STATE_ACCOUNT).map_err(|err| {
+        AuthError::SecureStorage(format!(
+            "Failed to open secure storage entry for cached accounts state: {err}",
+        ))
+    })
+}
 
 fn refresh_token_entry(service: &str, profile_id: &str) -> Result<Entry, AuthError> {
     Entry::new(service, profile_id).map_err(|err| {
@@ -11,6 +21,36 @@ fn refresh_token_entry(service: &str, profile_id: &str) -> Result<Entry, AuthErr
             "Failed to open refresh-token secure storage entry for profile '{profile_id}': {err}",
         ))
     })
+}
+
+pub(crate) fn load_accounts_state() -> Result<Option<String>, AuthError> {
+    let entry = accounts_state_entry()?;
+    match entry.get_password() {
+        Ok(value) => Ok(Some(value)),
+        Err(KeyringError::NoEntry) => Ok(None),
+        Err(err) => Err(AuthError::SecureStorage(format!(
+            "Failed to load cached accounts state from secure storage: {err}",
+        ))),
+    }
+}
+
+pub(crate) fn store_accounts_state(serialized_state: &str) -> Result<(), AuthError> {
+    let entry = accounts_state_entry()?;
+    entry.set_password(serialized_state).map_err(|err| {
+        AuthError::SecureStorage(format!(
+            "Failed to store cached accounts state in secure storage: {err}",
+        ))
+    })
+}
+
+pub(crate) fn delete_accounts_state() -> Result<(), AuthError> {
+    let entry = accounts_state_entry()?;
+    match entry.delete_credential() {
+        Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
+        Err(err) => Err(AuthError::SecureStorage(format!(
+            "Failed to delete cached accounts state from secure storage: {err}",
+        ))),
+    }
 }
 
 pub(crate) fn load_refresh_token(profile_id: &str) -> Result<Option<String>, AuthError> {
