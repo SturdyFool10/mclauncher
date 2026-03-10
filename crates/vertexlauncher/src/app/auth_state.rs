@@ -1,6 +1,8 @@
 use auth::{CachedAccount, CachedAccountRenewalEvent, CachedAccountsState};
 use launcher_ui::{notification, privacy};
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
@@ -80,7 +82,7 @@ pub struct AuthState {
 }
 
 impl AuthState {
-    pub fn load() -> Self {
+    pub fn load(streamer_mode: bool) -> Self {
         let (avatar_result_tx, avatar_result_rx) = mpsc::channel();
         let (accounts_state, status) = match auth::load_cached_accounts() {
             Ok(state) => (state, AuthUiStatus::Idle),
@@ -101,7 +103,7 @@ impl AuthState {
             active_avatar_png,
             flow: None,
             renewal: None,
-            streamer_mode: false,
+            streamer_mode,
             status,
         };
 
@@ -574,7 +576,7 @@ fn emit_cached_account_renewal_notification(event: CachedAccountRenewalEvent, st
                 notification::Severity::Info,
                 "Login Renewal",
                 format!("Renewing Login Token for {display_name}"),
-                format!("login-renewal:{profile_id}"),
+                renewal_replace_key(&profile_id),
             );
         }
         CachedAccountRenewalEvent::Succeeded {
@@ -586,7 +588,7 @@ fn emit_cached_account_renewal_notification(event: CachedAccountRenewalEvent, st
                 notification::Severity::Info,
                 "Login Renewal",
                 format!("login token for {display_name} successful, you are ready to play!"),
-                format!("login-renewal:{profile_id}"),
+                renewal_replace_key(&profile_id),
             );
         }
         CachedAccountRenewalEvent::Failed {
@@ -607,10 +609,16 @@ fn emit_cached_account_renewal_notification(event: CachedAccountRenewalEvent, st
                 notification::Severity::Error,
                 "Login Renewal",
                 format!("Error in attepting to renew login for {display_name_for_notification}"),
-                format!("login-renewal:{profile_id}"),
+                renewal_replace_key(&profile_id),
             );
         }
     }
+}
+
+fn renewal_replace_key(profile_id: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    profile_id.hash(&mut hasher);
+    format!("login-renewal:{:016x}", hasher.finish())
 }
 
 fn run_sign_in_flow(client_id: String, sender: mpsc::Sender<AuthFlowEvent>) {

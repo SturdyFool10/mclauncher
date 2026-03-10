@@ -203,14 +203,6 @@ fn render_contents(
     render_cape_grid(ui, text_ui, state);
 
     ui.add_space(style::SPACE_MD);
-    if let Some(status) = state.status_message.as_deref() {
-        let _ = text_ui.label(ui, "skins_status", status, &body);
-    }
-    if state.save_in_progress {
-        let _ = text_ui.label(ui, "skins_saving", "Saving changes...", &muted);
-    }
-
-    ui.add_space(style::SPACE_MD);
     let mut save_style = button_style.clone();
     let viewport_width = ui.clip_rect().width().max(1.0);
     let save_width = ui.available_width().min(viewport_width).max(1.0);
@@ -2880,7 +2872,7 @@ impl SkinManagerState {
                 }
             }
             Err(err) => {
-                self.status_message = Some(format!("Failed to load account cache: {err}"));
+                notification::error!("skin_manager", "Failed to load account cache: {err}");
             }
         }
     }
@@ -2937,8 +2929,10 @@ impl SkinManagerState {
                     Err(_) => {
                         self.save_in_progress = false;
                         self.refresh_in_progress = false;
-                        self.status_message =
-                            Some("Background profile task lock was poisoned.".to_owned());
+                        notification::error!(
+                            "skin_manager",
+                            "Background profile task lock was poisoned."
+                        );
                         keep_rx = false;
                         break;
                     }
@@ -2965,12 +2959,8 @@ impl SkinManagerState {
                                 if self.pending_skin_png.is_some()
                                     || self.pending_cape_id != self.initial_cape_id
                                 {
-                                    self.status_message = Some(
-                                        "Profile refreshed, keeping unsaved edits.".to_owned(),
-                                    );
                                 } else {
                                     self.apply_loaded_profile(profile);
-                                    self.status_message = Some("Profile refreshed.".to_owned());
                                 }
                             }
                             Err(err) => {
@@ -2979,7 +2969,7 @@ impl SkinManagerState {
                                     error = %err,
                                     "Skin manager refresh failed."
                                 );
-                                self.status_message = Some(err);
+                                notification::error!("skin_manager", "{err}");
                             }
                         }
                         keep_rx = false;
@@ -3002,8 +2992,6 @@ impl SkinManagerState {
                                     break;
                                 }
                                 self.apply_loaded_profile(profile);
-                                self.status_message =
-                                    Some("Saved skin and cape changes.".to_owned());
                                 notification::info!("skin_manager", "Saved skin and cape changes.");
                             }
                             Err(err) => {
@@ -3013,7 +3001,6 @@ impl SkinManagerState {
                                     "Skin manager save failed."
                                 );
                                 notification::error!("skin_manager", "{err}");
-                                self.status_message = Some(err);
                             }
                         }
                         keep_rx = false;
@@ -3058,7 +3045,6 @@ impl SkinManagerState {
 
         let Some(image) = decode_skin_rgba(bytes) else {
             self.skin_sample = None;
-            self.status_message = Some("Selected skin image could not be decoded.".to_owned());
             return;
         };
         let image = Arc::new(image);
@@ -3159,9 +3145,9 @@ impl SkinManagerState {
         match std::fs::read(path.as_path()) {
             Ok(bytes) => {
                 if decode_skin_rgba(&bytes).is_none() {
-                    self.status_message = Some(
+                    notification::error!(
+                        "skin_manager",
                         "Selected image must be a valid PNG skin (expected 64x64 or 64x32)."
-                            .to_owned(),
                     );
                     return;
                 }
@@ -3171,10 +3157,9 @@ impl SkinManagerState {
                 self.skin_sample = None;
                 self.preview_texture = None;
                 self.preview_history = None;
-                self.status_message = Some("Skin preview updated.".to_owned());
             }
             Err(err) => {
-                self.status_message = Some(format!("Failed to read image: {err}"));
+                notification::error!("skin_manager", "Failed to read image: {err}");
             }
         }
     }
@@ -3207,8 +3192,10 @@ impl SkinManagerState {
             .filter(|value| !value.is_empty())
             .map(str::to_owned)
         else {
-            self.status_message =
-                Some("Missing Minecraft access token for active account.".to_owned());
+            notification::error!(
+                "skin_manager",
+                "Missing Minecraft access token for active account."
+            );
             return;
         };
 
@@ -3278,8 +3265,10 @@ impl SkinManagerState {
             .filter(|value| !value.is_empty())
             .map(str::to_owned)
         else {
-            self.status_message =
-                Some("Missing Minecraft access token for active account.".to_owned());
+            notification::error!(
+                "skin_manager",
+                "Missing Minecraft access token for active account."
+            );
             return;
         };
 
@@ -3290,7 +3279,6 @@ impl SkinManagerState {
         }
 
         self.save_in_progress = true;
-        self.status_message = Some("Saving changes...".to_owned());
         let pending_skin = self.pending_skin_png.clone();
         let pending_variant = self.pending_variant;
         let pending_cape = self.pending_cape_id.clone();

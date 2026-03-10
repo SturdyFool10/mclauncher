@@ -1611,6 +1611,7 @@ fn render_instance_settings_modal(
                                         None,
                                         None,
                                         None,
+                                        None,
                                     );
                                 } else {
                                     state.status_message =
@@ -2142,8 +2143,15 @@ fn render_runtime_row(
                     };
                     let extra_jvm_args = normalize_optional(state.cli_args_input.as_str());
                     state.launch_username = launch_display_name
-                        .clone()
-                        .or_else(|| launch_account.clone());
+                        .as_deref()
+                        .map(|value| {
+                            privacy::redact_account_label(streamer_mode, value).into_owned()
+                        })
+                        .or_else(|| {
+                            launch_account.as_deref().map(|value| {
+                                privacy::redact_account_label(streamer_mode, value).into_owned()
+                            })
+                        });
                     state.launch_user_key = launch_player_uuid
                         .clone()
                         .or_else(|| launch_account.clone())
@@ -2174,6 +2182,7 @@ fn render_runtime_row(
                         config.parsed_download_speed_limit_bps(),
                         max_memory_mib,
                         extra_jvm_args,
+                        state.launch_username.clone(),
                         launch_display_name.clone(),
                         launch_player_uuid.clone(),
                         launch_access_token.clone(),
@@ -3104,6 +3113,7 @@ fn request_runtime_prepare(
     download_speed_limit_bps: Option<u64>,
     max_memory_mib: u128,
     extra_jvm_args: Option<String>,
+    visible_username: Option<String>,
     player_name: Option<String>,
     player_uuid: Option<String>,
     access_token: Option<String>,
@@ -3149,6 +3159,7 @@ fn request_runtime_prepare(
         .map(str::to_owned);
     let java_executable_for_task = java_executable;
     let extra_jvm_args_for_task = extra_jvm_args;
+    let visible_username_for_task = visible_username;
     let player_name_for_task = player_name;
     let player_uuid_for_task = player_uuid;
     let access_token_for_task = access_token;
@@ -3188,8 +3199,9 @@ fn request_runtime_prepare(
     } else {
         "java from PATH".to_owned()
     };
-    let username = player_name_for_task
+    let username = visible_username_for_task
         .as_deref()
+        .or(player_name_for_task.as_deref())
         .or(launch_account_name_for_task.as_deref())
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("Player");

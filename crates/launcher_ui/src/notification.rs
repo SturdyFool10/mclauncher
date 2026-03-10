@@ -1,12 +1,13 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
 use egui::{self, Color32, CornerRadius, Frame, Layout, Margin, Stroke};
 use textui::{LabelOptions, TextUi};
 
-use crate::assets;
+use crate::{assets, privacy};
 
 const NOTIFICATION_TTL: Duration = Duration::from_secs(7);
 const PROGRESS_NOTIFICATION_STALE_TTL: Duration = Duration::from_secs(14);
@@ -58,6 +59,11 @@ struct NotificationCenter {
 }
 
 static NOTIFICATION_CENTER: OnceLock<NotificationCenter> = OnceLock::new();
+static STREAMER_MODE_ENABLED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_streamer_mode(enabled: bool) {
+    STREAMER_MODE_ENABLED.store(enabled, Ordering::Relaxed);
+}
 
 fn center() -> &'static NotificationCenter {
     NOTIFICATION_CENTER.get_or_init(|| {
@@ -89,8 +95,9 @@ fn severity_name(severity: Severity) -> &'static str {
 }
 
 pub fn emit(severity: Severity, source: impl Into<String>, message: impl Into<String>) {
-    let source = source.into();
-    let message = message.into();
+    let streamer_mode = STREAMER_MODE_ENABLED.load(Ordering::Relaxed);
+    let source = privacy::redact_sensitive_text(streamer_mode, &source.into()).into_owned();
+    let message = privacy::redact_sensitive_text(streamer_mode, &message.into()).into_owned();
     match severity {
         Severity::Log => {
             tracing::debug!(target: "notification", source = %source, message = %message)
@@ -122,8 +129,9 @@ pub fn emit_progress(
     message: impl Into<String>,
     progress: f32,
 ) {
-    let source = source.into();
-    let message = message.into();
+    let streamer_mode = STREAMER_MODE_ENABLED.load(Ordering::Relaxed);
+    let source = privacy::redact_sensitive_text(streamer_mode, &source.into()).into_owned();
+    let message = privacy::redact_sensitive_text(streamer_mode, &message.into()).into_owned();
     let progress = progress.clamp(0.0, 1.0);
     let _ = center().tx.send(Notification {
         severity,
@@ -142,15 +150,18 @@ pub fn emit_spinner(
     message: impl Into<String>,
     replace_key: impl Into<String>,
 ) {
-    let source = source.into();
-    let message = message.into();
+    let streamer_mode = STREAMER_MODE_ENABLED.load(Ordering::Relaxed);
+    let source = privacy::redact_sensitive_text(streamer_mode, &source.into()).into_owned();
+    let message = privacy::redact_sensitive_text(streamer_mode, &message.into()).into_owned();
+    let replace_key =
+        privacy::redact_sensitive_text(streamer_mode, &replace_key.into()).into_owned();
     let _ = center().tx.send(Notification {
         severity,
         source,
         message,
         progress: None,
         spinner: true,
-        replace_key: Some(replace_key.into()),
+        replace_key: Some(replace_key),
         when: Instant::now(),
     });
 }
@@ -161,15 +172,18 @@ pub fn emit_replace(
     message: impl Into<String>,
     replace_key: impl Into<String>,
 ) {
-    let source = source.into();
-    let message = message.into();
+    let streamer_mode = STREAMER_MODE_ENABLED.load(Ordering::Relaxed);
+    let source = privacy::redact_sensitive_text(streamer_mode, &source.into()).into_owned();
+    let message = privacy::redact_sensitive_text(streamer_mode, &message.into()).into_owned();
+    let replace_key =
+        privacy::redact_sensitive_text(streamer_mode, &replace_key.into()).into_owned();
     let _ = center().tx.send(Notification {
         severity,
         source,
         message,
         progress: None,
         spinner: false,
-        replace_key: Some(replace_key.into()),
+        replace_key: Some(replace_key),
         when: Instant::now(),
     });
 }

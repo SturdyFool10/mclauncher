@@ -2,10 +2,11 @@ use keyring::{Entry, Error as KeyringError};
 
 use crate::error::AuthError;
 
-const REFRESH_TOKEN_SERVICE: &str = "vertexlauncher.microsoft_refresh_token";
+const REFRESH_TOKEN_SERVICE: &str = "vertexlauncher.microsoft_refresh_token.v2";
+const LEGACY_REFRESH_TOKEN_SERVICE: &str = "vertexlauncher.microsoft_refresh_token";
 
-fn refresh_token_entry(profile_id: &str) -> Result<Entry, AuthError> {
-    Entry::new(REFRESH_TOKEN_SERVICE, profile_id).map_err(|err| {
+fn refresh_token_entry(service: &str, profile_id: &str) -> Result<Entry, AuthError> {
+    Entry::new(service, profile_id).map_err(|err| {
         AuthError::SecureStorage(format!(
             "Failed to open refresh-token secure storage entry for profile '{profile_id}': {err}",
         ))
@@ -13,10 +14,13 @@ fn refresh_token_entry(profile_id: &str) -> Result<Entry, AuthError> {
 }
 
 pub(crate) fn load_refresh_token(profile_id: &str) -> Result<Option<String>, AuthError> {
-    let entry = refresh_token_entry(profile_id)?;
+    let entry = refresh_token_entry(REFRESH_TOKEN_SERVICE, profile_id)?;
     match entry.get_password() {
         Ok(value) => Ok(Some(value)),
-        Err(KeyringError::NoEntry) => Ok(None),
+        Err(KeyringError::NoEntry) => load_legacy_refresh_token(profile_id),
+        Err(err) if is_corrupt_secure_storage_error(&err) => Err(AuthError::SecureStorage(
+            format!("Failed to load refresh token for profile '{profile_id}': {err}",),
+        )),
         Err(err) => Err(AuthError::SecureStorage(format!(
             "Failed to load refresh token for profile '{profile_id}': {err}",
         ))),
@@ -24,20 +28,59 @@ pub(crate) fn load_refresh_token(profile_id: &str) -> Result<Option<String>, Aut
 }
 
 pub(crate) fn store_refresh_token(profile_id: &str, refresh_token: &str) -> Result<(), AuthError> {
-    let entry = refresh_token_entry(profile_id)?;
+    let entry = refresh_token_entry(REFRESH_TOKEN_SERVICE, profile_id)?;
     entry.set_password(refresh_token).map_err(|err| {
         AuthError::SecureStorage(format!(
             "Failed to store refresh token for profile '{profile_id}': {err}",
         ))
-    })
+    })?;
+    let _ = delete_refresh_token_for_service(LEGACY_REFRESH_TOKEN_SERVICE, profile_id);
+    Ok(())
 }
 
 pub(crate) fn delete_refresh_token(profile_id: &str) -> Result<(), AuthError> {
-    let entry = refresh_token_entry(profile_id)?;
+    delete_refresh_token_for_service(REFRESH_TOKEN_SERVICE, profile_id)?;
+    delete_refresh_token_for_service(LEGACY_REFRESH_TOKEN_SERVICE, profile_id)?;
+    Ok(())
+}
+
+fn load_legacy_refresh_token(profile_id: &str) -> Result<Option<String>, AuthError> {
+    let legacy_entry = refresh_token_entry(LEGACY_REFRESH_TOKEN_SERVICE, profile_id)?;
+    match legacy_entry.get_password() {
+        Ok(value) => {
+            store_refresh_token(profile_id, &value)?;
+            Ok(Some(value))
+        }
+        Err(KeyringError::NoEntry) => Ok(None),
+        Err(err) if is_corrupt_secure_storage_error(&err) => {
+            tracing::warn!(
+                target: "vertexlauncher/auth/secret_store",
+                profile_id,
+                error = %err,
+                "ignoring unreadable legacy refresh-token entry"
+            );
+            let _ = delete_refresh_token_for_service(LEGACY_REFRESH_TOKEN_SERVICE, profile_id);
+            Ok(None)
+        }
+        Err(err) => Err(AuthError::SecureStorage(format!(
+            "Failed to load refresh token for profile '{profile_id}' from legacy secure storage: {err}",
+        ))),
+    }
+}
+
+fn delete_refresh_token_for_service(service: &str, profile_id: &str) -> Result<(), AuthError> {
+    let entry = refresh_token_entry(service, profile_id)?;
     match entry.delete_credential() {
         Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
         Err(err) => Err(AuthError::SecureStorage(format!(
             "Failed to delete refresh token for profile '{profile_id}': {err}",
         ))),
     }
+}
+
+fn is_corrupt_secure_storage_error(err: &KeyringError) -> bool {
+    let error_text = err.to_string();
+    error_text.contains("Crypto error")
+        || error_text.contains("Unpad Error")
+        || error_text.contains("Platform secure storage failure")
 }

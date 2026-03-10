@@ -113,6 +113,7 @@ impl VertexApp {
                 InstanceStore::default()
             }
         };
+        let streamer_mode_enabled = config.streamer_mode_enabled();
 
         let mut app = Self {
             fonts: FontController::new(config.ui_font_family()),
@@ -129,7 +130,7 @@ impl VertexApp {
             instance_store,
             show_create_instance_modal: false,
             create_instance_state: create_instance_modal::CreateInstanceState::default(),
-            auth: AuthState::load(),
+            auth: AuthState::load(streamer_mode_enabled),
             text_ui,
             last_frame_end: None,
             last_rendered_screen: None,
@@ -241,6 +242,7 @@ impl eframe::App for VertexApp {
         self.theme.apply(ctx, self.config.window_blur_enabled());
         self.auth
             .set_streamer_mode(self.config.streamer_mode_enabled());
+        notification::set_streamer_mode(self.config.streamer_mode_enabled());
         self.fonts
             .ensure_selected_font_is_available(&mut self.config);
         self.fonts
