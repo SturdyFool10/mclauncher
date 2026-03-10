@@ -231,6 +231,60 @@ where
     Ok(state)
 }
 
+/// Renews a single cached account session identified by profile id.
+///
+/// Only the selected account is refreshed and saved back to cache.
+pub fn renew_cached_account_token(
+    client_id: &str,
+    profile_id: &str,
+) -> Result<CachedAccountsState, AuthError> {
+    let mut state = cache::load_cached_accounts()?;
+    let Some(index) = state
+        .accounts
+        .iter()
+        .position(|account| account.minecraft_profile.id == profile_id)
+    else {
+        return Err(AuthError::OAuth(format!(
+            "No cached account found for profile id '{profile_id}'."
+        )));
+    };
+
+    let refresh_token = state.accounts[index]
+        .microsoft_refresh_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            AuthError::OAuth(format!(
+                "Cached account '{profile_id}' has no Microsoft refresh token."
+            ))
+        })?
+        .to_owned();
+
+    let agent = util::build_http_agent();
+    let mut renewed = oauth::refresh_microsoft_token(&agent, client_id, refresh_token.as_str())
+        .and_then(|microsoft_token| {
+            minecraft::complete_minecraft_login(
+                &agent,
+                &microsoft_token.access_token,
+                microsoft_token.refresh_token.as_deref(),
+            )
+        })?;
+    if renewed
+        .microsoft_refresh_token
+        .as_deref()
+        .map(str::trim)
+        .is_none_or(|value| value.is_empty())
+    {
+        renewed.microsoft_refresh_token = Some(refresh_token);
+    }
+
+    state.accounts[index] = renewed;
+    state = state.normalize();
+    cache::save_cached_accounts(&state)?;
+    Ok(state)
+}
+
 /// Completes login from a full callback URL by extracting and validating `code`.
 pub fn login_finish_from_redirect(
     callback_url: &str,

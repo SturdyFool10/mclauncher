@@ -44,6 +44,7 @@ pub fn render(
 
 fn icon_for_screen(screen: AppScreen) -> (&'static str, &'static [u8]) {
     match screen {
+        AppScreen::Home => ("home", assets::HOME_SVG),
         AppScreen::Library => ("library", assets::LIBRARY_SVG),
         AppScreen::ContentBrowser => ("content_browser", assets::SHOPPING_CART_SVG),
         AppScreen::Skins => ("skin_selector", assets::SKIN_SELECTOR_SVG),

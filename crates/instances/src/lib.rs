@@ -87,6 +87,9 @@ pub struct InstanceRecord {
     pub cli_args: Option<String>,
     pub java_override_enabled: bool,
     pub java_override_runtime_major: Option<u8>,
+    pub launch_count: u64,
+    pub last_launched_at_ms: Option<u64>,
+    pub favorite_world_ids: Vec<String>,
 }
 
 impl Default for InstanceRecord {
@@ -104,6 +107,9 @@ impl Default for InstanceRecord {
             cli_args: None,
             java_override_enabled: false,
             java_override_runtime_major: None,
+            launch_count: 0,
+            last_launched_at_ms: None,
+            favorite_world_ids: Vec::new(),
         }
     }
 }
@@ -279,6 +285,9 @@ pub fn create_instance(
         cli_args: None,
         java_override_enabled: false,
         java_override_runtime_major: None,
+        launch_count: 0,
+        last_launched_at_ms: None,
+        favorite_world_ids: Vec::new(),
     };
 
     store.instances.push(instance.clone());
@@ -356,6 +365,58 @@ pub fn set_instance_settings(
         java_override_runtime_major = ?instance.java_override_runtime_major,
         "updated instance runtime settings"
     );
+    Ok(())
+}
+
+/// Records successful instance usage (launch count and last-used timestamp).
+pub fn record_instance_launch_usage(
+    store: &mut InstanceStore,
+    id: &str,
+) -> Result<(), InstanceError> {
+    let instance = store
+        .find_mut(id)
+        .ok_or_else(|| InstanceError::MissingInstance(id.to_owned()))?;
+    instance.launch_count = instance.launch_count.saturating_add(1);
+    instance.last_launched_at_ms = Some(current_time_millis());
+    tracing::debug!(
+        target: "vertexlauncher/instances",
+        id,
+        launch_count = instance.launch_count,
+        last_launched_at_ms = ?instance.last_launched_at_ms,
+        "recorded instance launch usage"
+    );
+    Ok(())
+}
+
+/// Toggles a world favorite for an instance by world identifier.
+pub fn set_world_favorite(
+    store: &mut InstanceStore,
+    id: &str,
+    world_id: &str,
+    favorite: bool,
+) -> Result<(), InstanceError> {
+    let normalized_world_id = world_id.trim();
+    if normalized_world_id.is_empty() {
+        return Ok(());
+    }
+    let instance = store
+        .find_mut(id)
+        .ok_or_else(|| InstanceError::MissingInstance(id.to_owned()))?;
+    if favorite {
+        if !instance
+            .favorite_world_ids
+            .iter()
+            .any(|entry| entry == normalized_world_id)
+        {
+            instance
+                .favorite_world_ids
+                .push(normalized_world_id.to_owned());
+        }
+    } else {
+        instance
+            .favorite_world_ids
+            .retain(|entry| entry != normalized_world_id);
+    }
     Ok(())
 }
 
@@ -499,12 +560,29 @@ fn normalize_instance(instance: &mut InstanceRecord) {
         instance.java_override_enabled,
         instance.java_override_runtime_major,
     );
+    instance.favorite_world_ids = normalize_world_favorites(&instance.favorite_world_ids);
 
     if instance.id.trim().is_empty() {
         instance.id = next_instance_id();
     } else {
         instance.id = instance.id.trim().to_owned();
     }
+}
+
+fn normalize_world_favorites(values: &[String]) -> Vec<String> {
+    let mut seen = HashSet::<String>::new();
+    let mut normalized = Vec::new();
+    for value in values {
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        let key = value.to_owned();
+        if seen.insert(key.clone()) {
+            normalized.push(key);
+        }
+    }
+    normalized
 }
 
 /// Generates a unique, filesystem-safe root name for a new instance.
@@ -597,4 +675,11 @@ fn next_instance_id() -> String {
         .unwrap_or_default();
     let counter = NEXT_INSTANCE_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("instance-{epoch_millis}-{counter}")
+}
+
+fn current_time_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
 }

@@ -11,6 +11,14 @@ fn main() -> eframe::Result<()> {
             std::process::exit(1);
         }
     }
+    match app::maybe_run_cli_command() {
+        Ok(true) => return Ok(()),
+        Ok(false) => {}
+        Err(err) => {
+            eprintln!("{err}");
+            std::process::exit(1);
+        }
+    }
 
     app::run()
 }

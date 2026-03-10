@@ -28,6 +28,7 @@ use self::fonts::FontController;
 
 mod app_icon;
 mod auth_state;
+mod cli;
 mod config_format_modal;
 mod create_instance_modal;
 mod fonts;
@@ -124,7 +125,7 @@ impl VertexApp {
             selected_config_format,
             default_config_format,
             config_creation_error: None,
-            active_screen: screens::AppScreen::Library,
+            active_screen: screens::AppScreen::Home,
             instance_shortcuts: Vec::new(),
             selected_instance_id: None,
             instance_store,
@@ -777,4 +778,8 @@ pub fn run() -> eframe::Result<()> {
 
 pub fn maybe_run_webview_helper() -> Result<bool, String> {
     webview_sign_in::maybe_run_helper_from_args()
+}
+
+pub fn maybe_run_cli_command() -> Result<bool, String> {
+    cli::maybe_run_from_args()
 }

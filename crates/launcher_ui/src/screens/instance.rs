@@ -11,7 +11,9 @@ use installation::{
     fetch_version_catalog_with_refresh, is_instance_running_for_account, launch_instance,
     running_instance_for_account, stop_running_instance_for_account,
 };
-use instances::{InstanceStore, set_instance_settings, set_instance_versions};
+use instances::{
+    InstanceStore, record_instance_launch_usage, set_instance_settings, set_instance_versions,
+};
 use modprovider::{ContentSource, UnifiedContentEntry, search_minecraft_content};
 use modrinth::Client as ModrinthClient;
 use std::{
@@ -296,7 +298,7 @@ pub fn render(
         .data_mut(|d| d.get_temp::<InstanceScreenState>(state_id))
         .unwrap_or_else(|| InstanceScreenState::from_instance(&instance_snapshot, config));
 
-    poll_background_tasks(&mut state, config);
+    poll_background_tasks(&mut state, config, instances, instance_id);
     sync_version_catalog(&mut state, config.include_snapshots_and_betas(), false);
     if state.version_catalog_in_flight
         || !state.modloader_versions_in_flight.is_empty()
@@ -2505,12 +2507,17 @@ fn save_instance_metadata_and_versions(
     .map_err(|err| err.to_string())
 }
 
-fn poll_background_tasks(state: &mut InstanceScreenState, config: &mut Config) {
+fn poll_background_tasks(
+    state: &mut InstanceScreenState,
+    config: &mut Config,
+    instances: &mut InstanceStore,
+    instance_id: &str,
+) {
     poll_version_catalog(state);
     poll_modloader_versions(state);
     poll_content_lookup_results(state);
     poll_runtime_progress(state);
-    poll_runtime_prepare(state, config);
+    poll_runtime_prepare(state, config, instances, instance_id);
 }
 
 fn sync_version_catalog(
@@ -3296,6 +3303,8 @@ fn request_runtime_prepare(
                     auth_access_token: access_token_for_task.clone(),
                     auth_xuid: xuid_for_task.clone(),
                     auth_user_type: user_type_for_task.clone(),
+                    quick_play_singleplayer: None,
+                    quick_play_multiplayer: None,
                 };
                 Some(launch_instance(&launch_request).map_err(|err| err.to_string())?)
             } else {
@@ -3372,7 +3381,12 @@ fn poll_runtime_progress(state: &mut InstanceScreenState) {
     }
 }
 
-fn poll_runtime_prepare(state: &mut InstanceScreenState, config: &mut Config) {
+fn poll_runtime_prepare(
+    state: &mut InstanceScreenState,
+    config: &mut Config,
+    instances: &mut InstanceStore,
+    instance_id: &str,
+) {
     let mut updates = Vec::new();
     let mut should_reset_channel = false;
     if let Some(rx) = state.runtime_prepare_results_rx.as_ref() {
@@ -3422,6 +3436,7 @@ fn poll_runtime_prepare(state: &mut InstanceScreenState, config: &mut Config) {
                 }
                 let setup = outcome.setup;
                 if let Some(launch) = outcome.launch {
+                    let _ = record_instance_launch_usage(instances, instance_id);
                     let username = state
                         .launch_username
                         .as_deref()
@@ -3530,13 +3545,13 @@ fn should_emit_progress_notification(
 }
 
 fn progress_fraction(progress: &InstallProgress) -> f32 {
-    if progress.total_files > 0 {
-        return (progress.downloaded_files as f32 / progress.total_files as f32).clamp(0.0, 1.0);
-    }
     if let Some(total_bytes) = progress.total_bytes
         && total_bytes > 0
     {
         return (progress.downloaded_bytes as f32 / total_bytes as f32).clamp(0.0, 1.0);
+    }
+    if progress.total_files > 0 {
+        return (progress.downloaded_files as f32 / progress.total_files as f32).clamp(0.0, 1.0);
     }
     if matches!(progress.stage, InstallStage::Complete) {
         1.0
@@ -3546,13 +3561,13 @@ fn progress_fraction(progress: &InstallProgress) -> f32 {
 }
 
 fn progress_fraction_from_activity(progress: &install_activity::InstallActivitySnapshot) -> f32 {
-    if progress.total_files > 0 {
-        return (progress.downloaded_files as f32 / progress.total_files as f32).clamp(0.0, 1.0);
-    }
     if let Some(total_bytes) = progress.total_bytes
         && total_bytes > 0
     {
         return (progress.downloaded_bytes as f32 / total_bytes as f32).clamp(0.0, 1.0);
+    }
+    if progress.total_files > 0 {
+        return (progress.downloaded_files as f32 / progress.total_files as f32).clamp(0.0, 1.0);
     }
     if matches!(progress.stage, InstallStage::Complete) {
         1.0

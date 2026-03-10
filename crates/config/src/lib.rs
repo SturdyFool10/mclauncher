@@ -459,6 +459,7 @@ pub struct Config {
     download_max_concurrent: u32,
     download_speed_limit_enabled: bool,
     download_speed_limit: String,
+    curseforge_api_key: String,
     java_8_jvm_path: Option<String>,
     java_16_jvm_path: Option<String>,
     java_17_jvm_path: Option<String>,
@@ -623,6 +624,21 @@ impl Config {
         &mut self.download_speed_limit
     }
 
+    /// Returns user-provided CurseForge API key.
+    pub fn curseforge_api_key(&self) -> &str {
+        &self.curseforge_api_key
+    }
+
+    /// Mutable access to user-provided CurseForge API key.
+    pub fn curseforge_api_key_mut(&mut self) -> &mut String {
+        &mut self.curseforge_api_key
+    }
+
+    /// Sets user-provided CurseForge API key.
+    pub fn set_curseforge_api_key(&mut self, api_key: impl Into<String>) {
+        self.curseforge_api_key = api_key.into().trim().to_owned();
+    }
+
     /// Parses configured bandwidth limit into bits per second when enabled.
     pub fn parsed_download_speed_limit_bps(&self) -> Option<u64> {
         if !self.download_speed_limit_enabled {
@@ -668,6 +684,7 @@ impl Config {
             .download_max_concurrent
             .clamp(DOWNLOAD_CONCURRENCY_MIN, DOWNLOAD_CONCURRENCY_MAX);
         self.download_speed_limit = self.download_speed_limit.trim().to_owned();
+        self.curseforge_api_key = self.curseforge_api_key.trim().to_owned();
         normalize_required_path(
             &mut self.minecraft_installations_root,
             DEFAULT_MINECRAFT_INSTALLATIONS_ROOT,
@@ -709,6 +726,7 @@ impl Config {
             java_16_jvm_path: _,
             java_17_jvm_path: _,
             java_21_jvm_path: _,
+            curseforge_api_key: _,
         } = self;
 
         visit(
@@ -768,6 +786,7 @@ impl Config {
             download_max_concurrent: _,
             download_speed_limit_enabled: _,
             download_speed_limit: _,
+            curseforge_api_key: _,
             java_8_jvm_path: _,
             java_16_jvm_path: _,
             java_17_jvm_path: _,
@@ -801,6 +820,7 @@ impl Config {
             download_max_concurrent: _,
             download_speed_limit_enabled: _,
             download_speed_limit: _,
+            curseforge_api_key: _,
             java_8_jvm_path: _,
             java_16_jvm_path: _,
             java_17_jvm_path: _,
@@ -834,6 +854,7 @@ impl Config {
             download_max_concurrent: _,
             download_speed_limit_enabled: _,
             download_speed_limit: _,
+            curseforge_api_key: _,
             java_8_jvm_path: _,
             java_16_jvm_path: _,
             java_17_jvm_path: _,
@@ -868,6 +889,7 @@ impl Config {
             download_max_concurrent: _,
             download_speed_limit_enabled: _,
             download_speed_limit: _,
+            curseforge_api_key: _,
             java_8_jvm_path: _,
             java_16_jvm_path: _,
             java_17_jvm_path: _,
@@ -921,6 +943,7 @@ impl Default for Config {
             download_max_concurrent: DEFAULT_DOWNLOAD_CONCURRENCY,
             download_speed_limit_enabled: false,
             download_speed_limit: String::new(),
+            curseforge_api_key: String::new(),
             java_8_jvm_path: None,
             java_16_jvm_path: None,
             java_17_jvm_path: None,

@@ -521,13 +521,17 @@ pub fn render(
     selected_instance_id: Option<&str>,
     instances: &InstanceStore,
     config: &Config,
+    force_reset: bool,
 ) -> ContentBrowserOutput {
     let mut output = ContentBrowserOutput::default();
     let state_id = ui.make_persistent_id("content_browser_state");
-    let mut state = ui
-        .ctx()
-        .data_mut(|data| data.get_temp::<ContentBrowserState>(state_id))
-        .unwrap_or_default();
+    let mut state = if force_reset {
+        ContentBrowserState::default()
+    } else {
+        ui.ctx()
+            .data_mut(|data| data.get_temp::<ContentBrowserState>(state_id))
+            .unwrap_or_default()
+    };
 
     poll_search(&mut state);
     poll_detail_versions(&mut state);
@@ -779,8 +783,15 @@ fn render_controls(
         });
 
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
+        let gap = ui.spacing().item_spacing.x;
+        let column_width = ((ui.available_width() - (gap * 2.0)) / 3.0).max(140.0);
+        ui.columns(3, |cols| {
+            cols[0].set_min_width(column_width);
+            cols[1].set_min_width(column_width);
+            cols[2].set_min_width(column_width);
+
             egui::ComboBox::from_id_salt(("content_browser_minecraft_version", instance_id))
+                .width(column_width)
                 .selected_text(format!(
                     "Minecraft: {}",
                     selected_minecraft_version_label(
@@ -788,7 +799,7 @@ fn render_controls(
                         &state.available_game_versions,
                     )
                 ))
-                .show_ui(ui, |ui| {
+                .show_ui(&mut cols[0], |ui| {
                     ui.selectable_value(
                         &mut state.minecraft_version_filter,
                         String::new(),
@@ -804,16 +815,18 @@ fn render_controls(
                 });
 
             egui::ComboBox::from_id_salt(("content_browser_scope", instance_id))
+                .width(column_width)
                 .selected_text(format!("Content: {}", state.content_scope.label()))
-                .show_ui(ui, |ui| {
+                .show_ui(&mut cols[1], |ui| {
                     for scope in ContentScope::ALL {
                         ui.selectable_value(&mut state.content_scope, scope, scope.label());
                     }
                 });
 
             egui::ComboBox::from_id_salt(("content_browser_mod_sort", instance_id))
+                .width(column_width)
                 .selected_text(format!("Mods sort: {}", state.mod_sort_mode.label()))
-                .show_ui(ui, |ui| {
+                .show_ui(&mut cols[2], |ui| {
                     for mode in ModSortMode::ALL {
                         ui.selectable_value(&mut state.mod_sort_mode, mode, mode.label());
                     }

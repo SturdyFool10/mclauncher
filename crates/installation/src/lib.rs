@@ -218,6 +218,8 @@ pub struct LaunchRequest {
     pub auth_access_token: Option<String>,
     pub auth_xuid: Option<String>,
     pub auth_user_type: Option<String>,
+    pub quick_play_singleplayer: Option<String>,
+    pub quick_play_multiplayer: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -881,6 +883,8 @@ pub fn launch_instance(request: &LaunchRequest) -> Result<LaunchResult, Installa
         request.auth_access_token.as_deref(),
         request.auth_xuid.as_deref(),
         request.auth_user_type.as_deref(),
+        request.quick_play_singleplayer.as_deref(),
+        request.quick_play_multiplayer.as_deref(),
     );
 
     let mut jvm_args = collect_jvm_arguments(&profile_chain, &launch_context);
@@ -1384,7 +1388,12 @@ fn library_classpath_dedupe_key(lib: &serde_json::Value, artifact_path: &str) ->
             let group = group.trim();
             let artifact = artifact.trim();
             if !group.is_empty() && !artifact.is_empty() {
-                return format!("{group}:{artifact}");
+                let classifier = parts
+                    .nth(1)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("");
+                return format!("{group}:{artifact}:{classifier}");
             }
         }
     }
@@ -1494,6 +1503,8 @@ fn build_launch_context(
     auth_access_token: Option<&str>,
     auth_xuid: Option<&str>,
     auth_user_type: Option<&str>,
+    quick_play_singleplayer: Option<&str>,
+    quick_play_multiplayer: Option<&str>,
 ) -> LaunchContext {
     let username = player_name
         .map(str::trim)
@@ -1545,12 +1556,43 @@ fn build_launch_context(
     );
     substitutions.insert("launcher_name".to_owned(), "vertexlauncher".to_owned());
     substitutions.insert("launcher_version".to_owned(), "0.1".to_owned());
+    substitutions.insert(
+        "quickPlayPath".to_owned(),
+        instance_root.join("quickPlay").display().to_string(),
+    );
+    if let Some(world) = quick_play_singleplayer
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        substitutions.insert("quickPlaySingleplayer".to_owned(), world.to_owned());
+    }
+    if let Some(server) = quick_play_multiplayer
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        substitutions.insert("quickPlayMultiplayer".to_owned(), server.to_owned());
+    }
     let mut features = HashMap::new();
     features.insert("is_demo_user".to_owned(), false);
     features.insert("has_custom_resolution".to_owned(), false);
-    features.insert("has_quick_plays_support".to_owned(), false);
-    features.insert("is_quick_play_singleplayer".to_owned(), false);
-    features.insert("is_quick_play_multiplayer".to_owned(), false);
+    let has_quick_play_singleplayer = quick_play_singleplayer
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
+    let has_quick_play_multiplayer = quick_play_multiplayer
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
+    features.insert(
+        "has_quick_plays_support".to_owned(),
+        has_quick_play_singleplayer || has_quick_play_multiplayer,
+    );
+    features.insert(
+        "is_quick_play_singleplayer".to_owned(),
+        has_quick_play_singleplayer,
+    );
+    features.insert(
+        "is_quick_play_multiplayer".to_owned(),
+        has_quick_play_multiplayer,
+    );
     features.insert("is_quick_play_realms".to_owned(), false);
     LaunchContext {
         substitutions,
@@ -2221,13 +2263,13 @@ fn install_progress_fraction(
     downloaded_bytes: u64,
     total_bytes: Option<u64>,
 ) -> f64 {
-    if total_files > 0 {
-        return (downloaded_files as f64 / total_files as f64).clamp(0.0, 1.0);
-    }
     if let Some(total_bytes) = total_bytes
         && total_bytes > 0
     {
         return (downloaded_bytes as f64 / total_bytes as f64).clamp(0.0, 1.0);
+    }
+    if total_files > 0 {
+        return (downloaded_files as f64 / total_files as f64).clamp(0.0, 1.0);
     }
     0.0
 }

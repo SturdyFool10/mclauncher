@@ -1,11 +1,17 @@
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use std::sync::{Mutex, OnceLock};
 use tracing::{debug, warn};
 
 const DEFAULT_CURSEFORGE_API_BASE_URL: &str = "https://api.curseforge.com";
 const DEFAULT_USER_AGENT: &str =
     "VertexLauncher/0.1 (+https://github.com/SturdyFool10/vertexlauncher)";
 pub const MINECRAFT_GAME_ID: u32 = 432;
+static API_KEY_OVERRIDE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+fn api_key_override_store() -> &'static Mutex<Option<String>> {
+    API_KEY_OVERRIDE.get_or_init(|| Mutex::new(None))
+}
 
 /// Errors returned by CurseForge API requests.
 #[derive(Debug, thiserror::Error)]
@@ -98,6 +104,11 @@ impl Client {
     ///
     /// Returns `None` if no key exists or if the key is blank/invalid.
     pub fn from_env() -> Option<Self> {
+        if let Ok(override_key) = api_key_override_store().lock()
+            && let Some(key) = override_key.as_deref()
+        {
+            return Self::from_api_key(key.to_owned()).ok();
+        }
         let key = std::env::var("VERTEX_CURSEFORGE_API_KEY")
             .ok()
             .or_else(|| std::env::var("CURSEFORGE_API_KEY").ok())?;
@@ -373,6 +384,18 @@ impl Client {
             );
             CurseForgeError::Json(err)
         })
+    }
+}
+
+/// Sets an in-process API key override used by [`Client::from_env`].
+///
+/// Pass `None` to clear the override and fall back to environment variables.
+pub fn set_api_key_override(api_key: Option<String>) {
+    let normalized = api_key
+        .map(|key| key.trim().to_owned())
+        .filter(|key| !key.is_empty());
+    if let Ok(mut store) = api_key_override_store().lock() {
+        *store = normalized;
     }
 }
 

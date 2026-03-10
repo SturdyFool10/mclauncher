@@ -11,8 +11,15 @@ What the project already has today:
 - A native Rust desktop launcher built with `eframe/egui` + `wgpu`
 - Core instance workflow in place: create, manage, and launch instances
 - Account authentication flow and launch context wiring
+- Headless quick-launch CLI for Steam/Steam Deck style direct launches
 - A library screen, settings screen, console view, legal page, and skin manager screen
+- A home screen that tracks usage and surfaces the most-used instances
+- Cross-instance world/server discovery on Home, sorted by recent activity
+- World favorites pinned at the top of Home
+- Server reachability checks with ping-status icons on Home
+- Streamer-mode-aware server display on Home (server IP hidden when streamer mode is enabled)
 - Configurable themes and UI font options
+- User-configurable CurseForge API key in Settings
 - Performance and quality controls (frame limiter, preview AA modes, runtime/config tuning)
 - Modular crates for install/runtime/auth/mod-provider responsibilities
 - multiple instances launched at a time
@@ -45,6 +52,56 @@ The goal is to keep building a launcher that feels reliable and flexible without
 - Ready to adapt as Minecraft and modding ecosystems evolve
 
 In short: keep the app native, keep it practical, and keep improving the experience one solid feature at a time. do it all while making it from scratch
+
+---
+## Command Line (Quick Launch)
+
+These commands launch without showing the UI. They are designed for direct launch profiles (for example from Steam/Steam Deck).
+
+### Launch a modpack (instance) as a user
+
+```sh
+vertexlauncher --quick-launch-pack --instance <instance-id-or-name> --user <profile-id-or-username>
+```
+
+### Launch a world in a modpack as a user
+
+```sh
+vertexlauncher --quick-launch-world --instance <instance-id-or-name> --world <world-folder-name> --user <profile-id-or-username>
+```
+
+### Launch a server in a modpack as a user
+
+```sh
+vertexlauncher --quick-launch-server --instance <instance-id-or-name> --server <server-name-or-address> --user <profile-id-or-username>
+```
+
+### Helper tools for generating/inspecting args
+
+Show quick-launch help:
+
+```sh
+vertexlauncher --quick-launch-help
+```
+
+List available worlds/servers for one instance:
+
+```sh
+vertexlauncher --list-quick-launch-targets --instance <instance-id-or-name>
+```
+
+Build a full launch arg string for scripts/profiles:
+
+```sh
+vertexlauncher --build-quick-launch-args --mode <pack|world|server> --instance <instance-id-or-name> --user <profile-id-or-username> [--world <world-folder-name>] [--server <server-name-or-address>]
+```
+
+### Quick-launch behavior
+
+- Refreshes only the selected account token required for launch.
+- Uses the same instance resolution as the UI (`id` or instance name).
+- World launch expects a world folder name from `saves/`.
+- Server launch accepts either a saved server name or direct address.
 
 ---
 ## What we don't do

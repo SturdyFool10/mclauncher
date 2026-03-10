@@ -2,6 +2,12 @@
 
 pub const BELL_RINGING_SVG: &[u8] = include_bytes!("bell-ringing.svg");
 pub const BELL_SVG: &[u8] = include_bytes!("bell.svg");
+pub const ANTENNA_BARS_OFF_SVG: &[u8] = include_bytes!("antenna-bars-off.svg");
+pub const ANTENNA_BARS_1_SVG: &[u8] = include_bytes!("antenna-bars-1.svg");
+pub const ANTENNA_BARS_2_SVG: &[u8] = include_bytes!("antenna-bars-2.svg");
+pub const ANTENNA_BARS_3_SVG: &[u8] = include_bytes!("antenna-bars-3.svg");
+pub const ANTENNA_BARS_4_SVG: &[u8] = include_bytes!("antenna-bars-4.svg");
+pub const ANTENNA_BARS_5_SVG: &[u8] = include_bytes!("antenna-bars-5.svg");
 pub const ADJUSTMENTS_SVG: &[u8] = include_bytes!("adjustments.svg");
 pub const CHECK_SVG: &[u8] = include_bytes!("check.svg");
 pub const CHEVRON_DOWN_SVG: &[u8] = include_bytes!("chevron-down.svg");
@@ -12,6 +18,7 @@ pub const CREDIT_CARD_SVG: &[u8] = include_bytes!("credit-card.svg");
 pub const DOWNLOAD_SVG: &[u8] = include_bytes!("download.svg");
 pub const EDIT_SVG: &[u8] = include_bytes!("edit.svg");
 pub const ERROR_SVG: &[u8] = include_bytes!("error.svg");
+pub const HOME_SVG: &[u8] = include_bytes!("home.svg");
 pub const INFO_CIRCLE_SVG: &[u8] = include_bytes!("info-circle.svg");
 pub const LEGAL_SVG: &[u8] = include_bytes!("legal.svg");
 pub const LIBRARY_SVG: &[u8] = include_bytes!("library.svg");

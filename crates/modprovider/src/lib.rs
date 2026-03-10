@@ -1,9 +1,12 @@
 use std::collections::{BTreeSet, HashMap};
+use std::sync::Once;
 use std::thread;
 
 use curseforge::{Client as CurseForgeClient, MINECRAFT_GAME_ID};
 use modrinth::Client as ModrinthClient;
 use tracing::{debug, warn};
+
+static CURSEFORGE_MISSING_KEY_WARN_ONCE: Once = Once::new();
 
 /// Upstream platform that provided a unified content result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -215,11 +218,22 @@ fn search_curseforge(query: &str, limit: u32) -> ProviderSearchResult {
     );
     let mut result = ProviderSearchResult::default();
     let Some(curseforge) = CurseForgeClient::from_env() else {
-        warn!(
-            target: "vertexlauncher/modprovider",
-            provider = "CurseForge",
-            "provider disabled because API key is missing"
-        );
+        let mut emitted_warn = false;
+        CURSEFORGE_MISSING_KEY_WARN_ONCE.call_once(|| {
+            emitted_warn = true;
+            warn!(
+                target: "vertexlauncher/modprovider",
+                provider = "CurseForge",
+                "provider disabled because API key is missing"
+            );
+        });
+        if !emitted_warn {
+            debug!(
+                target: "vertexlauncher/modprovider",
+                provider = "CurseForge",
+                "provider disabled because API key is missing (repeat suppressed)"
+            );
+        }
         result.warnings.push(
             "CurseForge API key missing (set VERTEX_CURSEFORGE_API_KEY or CURSEFORGE_API_KEY). \
 Showing Modrinth results only."

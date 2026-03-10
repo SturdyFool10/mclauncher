@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use config::{Config, UiFontFamily};
+use curseforge::set_api_key_override as set_curseforge_api_key_override;
 use eframe::egui_wgpu::wgpu;
 use egui::Ui;
 use instances::InstanceStore;
@@ -10,6 +11,7 @@ use crate::ui::theme::Theme;
 
 mod console;
 mod content_browser;
+mod home;
 mod instance;
 mod legal;
 mod library;
@@ -18,6 +20,7 @@ mod skins;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppScreen {
+    Home,
     Library,
     ContentBrowser,
     Skins,
@@ -28,7 +31,8 @@ pub enum AppScreen {
 }
 
 impl AppScreen {
-    pub const FIXED_NAV: [AppScreen; 5] = [
+    pub const FIXED_NAV: [AppScreen; 6] = [
+        AppScreen::Home,
         AppScreen::Library,
         AppScreen::Skins,
         AppScreen::Settings,
@@ -38,6 +42,7 @@ impl AppScreen {
 
     pub fn label(self) -> &'static str {
         match self {
+            AppScreen::Home => "Home",
             AppScreen::Library => "Library",
             AppScreen::ContentBrowser => "Content Browser",
             AppScreen::Skins => "Skin Manager",
@@ -66,6 +71,24 @@ pub struct LaunchAuthContext {
     pub user_type: String,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct PendingLaunchIntent {
+    pub nonce: u64,
+    pub instance_id: String,
+    pub quick_play_singleplayer: Option<String>,
+    pub quick_play_multiplayer: Option<String>,
+}
+
+pub(crate) fn queue_launch_intent(ctx: &egui::Context, intent: PendingLaunchIntent) {
+    let id = egui::Id::new("pending_launch_intent");
+    ctx.data_mut(|data| data.insert_temp(id, intent));
+}
+
+pub(crate) fn peek_launch_intent(ctx: &egui::Context) -> Option<PendingLaunchIntent> {
+    let id = egui::Id::new("pending_launch_intent");
+    ctx.data_mut(|data| data.get_temp::<PendingLaunchIntent>(id))
+}
+
 pub fn render(
     ui: &mut Ui,
     screen: AppScreen,
@@ -85,7 +108,29 @@ pub fn render(
     available_themes: &[Theme],
     text_ui: &mut TextUi,
 ) -> ScreenOutput {
+    let content_browser_open_id = ui.make_persistent_id("content_browser_open_state");
+    let content_browser_was_open = ui
+        .ctx()
+        .data_mut(|data| data.get_temp::<bool>(content_browser_open_id))
+        .unwrap_or(false);
+    let content_browser_is_open = screen == AppScreen::ContentBrowser;
+    let reset_content_browser = content_browser_is_open && !content_browser_was_open;
+    ui.ctx()
+        .data_mut(|data| data.insert_temp(content_browser_open_id, content_browser_is_open));
+
+    set_curseforge_api_key_override(
+        (!config.curseforge_api_key().trim().is_empty())
+            .then(|| config.curseforge_api_key().to_owned()),
+    );
     match screen {
+        AppScreen::Home => {
+            let output = home::render(ui, text_ui, instances, config, streamer_mode);
+            ScreenOutput {
+                instances_changed: false,
+                requested_screen: output.requested_screen,
+                selected_instance_id: output.selected_instance_id,
+            }
+        }
         AppScreen::Library => {
             let installations_root =
                 std::path::PathBuf::from(config.minecraft_installations_root());
@@ -109,8 +154,14 @@ pub fn render(
             }
         }
         AppScreen::ContentBrowser => {
-            let output =
-                content_browser::render(ui, text_ui, selected_instance_id, instances, config);
+            let output = content_browser::render(
+                ui,
+                text_ui,
+                selected_instance_id,
+                instances,
+                config,
+                reset_content_browser,
+            );
             ScreenOutput {
                 instances_changed: false,
                 requested_screen: output.requested_screen,

@@ -13,16 +13,19 @@ use installation::{
     is_instance_running, is_instance_running_for_account, launch_instance,
     running_instance_for_account, stop_running_instance_for_account,
 };
-use instances::{InstanceRecord, InstanceStore, delete_instance, instance_root_path};
+use instances::{
+    InstanceRecord, InstanceStore, delete_instance, instance_root_path,
+    record_instance_launch_usage,
+};
 use textui::{LabelOptions, TextUi};
 
 use crate::app::tokio_runtime;
 use crate::{
-    assets, notification,
+    assets, console, notification,
     ui::{modal, style},
 };
 
-use super::{AppScreen, LaunchAuthContext};
+use super::{AppScreen, LaunchAuthContext, peek_launch_intent};
 
 const TILE_WIDTH: f32 = 300.0;
 const TILE_HEIGHT: f32 = 430.0;
@@ -56,7 +59,8 @@ pub fn render(
         .ctx()
         .data_mut(|data| data.get_temp::<LibraryRuntimeState>(state_id))
         .unwrap_or_default();
-    poll_runtime_actions(&mut state, config);
+    let pending_launch_intent = peek_launch_intent(ui.ctx());
+    poll_runtime_actions(&mut state, config, instances);
     if !state.pending_launches.is_empty() {
         ui.ctx().request_repaint_after(Duration::from_millis(100));
     }
@@ -186,6 +190,8 @@ pub fn render(
                                 launch_xuid.clone(),
                                 launch_user_type.clone(),
                                 launch_account.clone(),
+                                None,
+                                None,
                             );
                             if !requested {
                                 state.status_by_instance.insert(
@@ -197,6 +203,52 @@ pub fn render(
                         RuntimeAction::DeleteRequested => {
                             state.delete_target_instance_id = Some(instance.id.clone());
                             state.delete_error = None;
+                        }
+                    }
+
+                    if let Some(intent) = pending_launch_intent
+                        .as_ref()
+                        .filter(|intent| intent.instance_id == instance.id)
+                        .filter(|intent| {
+                            state.last_handled_launch_intent_nonce != Some(intent.nonce)
+                        })
+                    {
+                        state.last_handled_launch_intent_nonce = Some(intent.nonce);
+                        output.selected_instance_id = Some(instance.id.clone());
+                        if launch_disabled {
+                            state.status_by_instance.insert(
+                                instance.id.clone(),
+                                if launch_disabled_for_account {
+                                    "Selected account is already running another instance."
+                                        .to_owned()
+                                } else if launch_disabled_for_missing_ownership {
+                                    "Sign in with an account that owns Minecraft to launch."
+                                        .to_owned()
+                                } else {
+                                    "Launch is currently unavailable.".to_owned()
+                                },
+                            );
+                        } else {
+                            let requested = request_runtime_launch(
+                                &mut state,
+                                instance,
+                                instance_root.clone(),
+                                config,
+                                launch_display_name.clone(),
+                                launch_player_uuid.clone(),
+                                launch_access_token.clone(),
+                                launch_xuid.clone(),
+                                launch_user_type.clone(),
+                                launch_account.clone(),
+                                intent.quick_play_singleplayer.clone(),
+                                intent.quick_play_multiplayer.clone(),
+                            );
+                            if !requested {
+                                state.status_by_instance.insert(
+                                    instance.id.clone(),
+                                    "Launch is already in progress.".to_owned(),
+                                );
+                            }
                         }
                     }
                 }
@@ -749,6 +801,7 @@ fn render_delete_instance_modal(
                     match delete_instance(instances, instance.id.as_str(), installations_root) {
                         Ok(deleted) => {
                             state.pending_launches.remove(deleted.id.as_str());
+                            state.pending_launch_contexts.remove(deleted.id.as_str());
                             state.status_by_instance.remove(deleted.id.as_str());
                             state.delete_target_instance_id = None;
                             state.delete_error = None;
@@ -787,9 +840,19 @@ struct LibraryRuntimeState {
     results_tx: Option<mpsc::Sender<RuntimeLaunchResult>>,
     results_rx: Option<Arc<Mutex<mpsc::Receiver<RuntimeLaunchResult>>>>,
     pending_launches: HashSet<String>,
+    pending_launch_contexts: HashMap<String, PendingLaunchContext>,
     status_by_instance: HashMap<String, String>,
+    last_handled_launch_intent_nonce: Option<u64>,
     delete_target_instance_id: Option<String>,
     delete_error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingLaunchContext {
+    instance_name: String,
+    instance_root_display: String,
+    tab_user_key: Option<String>,
+    tab_username: String,
 }
 
 #[derive(Debug, Clone)]
@@ -826,6 +889,8 @@ fn request_runtime_launch(
     xuid: Option<String>,
     user_type: Option<String>,
     launch_account_name: Option<String>,
+    quick_play_singleplayer: Option<String>,
+    quick_play_multiplayer: Option<String>,
 ) -> bool {
     if state.pending_launches.contains(instance.id.as_str()) {
         return false;
@@ -854,6 +919,10 @@ fn request_runtime_launch(
 
     let modloader = instance.modloader.trim().to_owned();
     let modloader_version = normalize_optional(instance.modloader_version.as_str());
+    let modloader_version_display = modloader_version
+        .as_deref()
+        .map(|value| format!(" {value}"))
+        .unwrap_or_default();
     let required_java_major = effective_required_java_major(config, game_version.as_str());
     let java_executable = choose_java_executable(config, instance, required_java_major);
     let download_policy = DownloadPolicy {
@@ -868,6 +937,56 @@ fn request_runtime_launch(
         .as_deref()
         .and_then(normalize_optional)
         .or_else(|| normalize_optional(config.default_instance_cli_args()));
+    let instance_root_display = instance_root.display().to_string();
+    let tab_user_key = player_uuid
+        .as_deref()
+        .or(launch_account_name.as_deref())
+        .or(player_name.as_deref())
+        .and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_owned())
+            }
+        });
+    let tab_username = player_name
+        .as_deref()
+        .or(launch_account_name.as_deref())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("Player")
+        .to_owned();
+    let tab_id = console::ensure_instance_tab(
+        instance.name.as_str(),
+        tab_username.as_str(),
+        instance_root_display.as_str(),
+        tab_user_key.as_deref(),
+    );
+    console::set_instance_tab_loading(
+        instance_root_display.as_str(),
+        tab_user_key.as_deref(),
+        true,
+    );
+    console::push_line_to_tab(
+        tab_id.as_str(),
+        format!(
+            "Launch request: root={} | Minecraft {} | {}{} | max memory={} MiB",
+            instance_root_display,
+            game_version,
+            modloader,
+            modloader_version_display,
+            max_memory_mib.max(512),
+        ),
+    );
+    state.pending_launch_contexts.insert(
+        instance_id.clone(),
+        PendingLaunchContext {
+            instance_name: instance.name.clone(),
+            instance_root_display: instance_root_display.clone(),
+            tab_user_key: tab_user_key.clone(),
+            tab_username: tab_username.clone(),
+        },
+    );
 
     let _ = tokio_runtime::spawn(async move {
         let result = tokio_runtime::spawn_blocking(move || {
@@ -916,6 +1035,8 @@ fn request_runtime_launch(
                 auth_access_token: access_token.clone(),
                 auth_xuid: xuid.clone(),
                 auth_user_type: user_type.clone(),
+                quick_play_singleplayer: quick_play_singleplayer.clone(),
+                quick_play_multiplayer: quick_play_multiplayer.clone(),
             };
             let launch = launch_instance(&launch_request).map_err(|err| err.to_string())?;
             Ok(RuntimeLaunchOutcome {
@@ -937,7 +1058,11 @@ fn request_runtime_launch(
     true
 }
 
-fn poll_runtime_actions(state: &mut LibraryRuntimeState, config: &mut Config) {
+fn poll_runtime_actions(
+    state: &mut LibraryRuntimeState,
+    config: &mut Config,
+    instances: &mut InstanceStore,
+) {
     let mut updates = Vec::new();
     let mut should_reset_channel = false;
     if let Some(rx) = state.results_rx.as_ref() {
@@ -957,18 +1082,57 @@ fn poll_runtime_actions(state: &mut LibraryRuntimeState, config: &mut Config) {
     }
 
     if should_reset_channel {
+        for context in state.pending_launch_contexts.values() {
+            console::set_instance_tab_loading(
+                context.instance_root_display.as_str(),
+                context.tab_user_key.as_deref(),
+                false,
+            );
+        }
+        state.pending_launch_contexts.clear();
         state.results_tx = None;
         state.results_rx = None;
     }
 
     for update in updates {
         state.pending_launches.remove(update.instance_id.as_str());
+        let context = state
+            .pending_launch_contexts
+            .remove(update.instance_id.as_str());
+        if let Some(context) = context.as_ref() {
+            console::set_instance_tab_loading(
+                context.instance_root_display.as_str(),
+                context.tab_user_key.as_deref(),
+                false,
+            );
+        }
         match update.result {
             Ok(outcome) => {
+                let _ = record_instance_launch_usage(instances, update.instance_id.as_str());
                 if let Some((runtime_major, path)) = outcome.configured_java
                     && let Some(runtime) = java_runtime_from_major(runtime_major)
                 {
                     config.set_java_runtime_path(runtime, Some(path));
+                }
+                if let Some(context) = context.as_ref() {
+                    let tab_id = console::ensure_instance_tab(
+                        context.instance_name.as_str(),
+                        context.tab_username.as_str(),
+                        context.instance_root_display.as_str(),
+                        context.tab_user_key.as_deref(),
+                    );
+                    console::attach_launch_log(
+                        tab_id.as_str(),
+                        context.instance_root_display.as_str(),
+                        outcome.launch.launch_log_path.as_path(),
+                    );
+                    console::push_line_to_tab(
+                        tab_id.as_str(),
+                        format!(
+                            "Launched Minecraft (pid {}, profile {}).",
+                            outcome.launch.pid, outcome.launch.profile_id
+                        ),
+                    );
                 }
                 state.status_by_instance.insert(
                     update.instance_id,
@@ -985,6 +1149,15 @@ fn poll_runtime_actions(state: &mut LibraryRuntimeState, config: &mut Config) {
                 );
             }
             Err(err) => {
+                if let Some(context) = context.as_ref() {
+                    let tab_id = console::ensure_instance_tab(
+                        context.instance_name.as_str(),
+                        context.tab_username.as_str(),
+                        context.instance_root_display.as_str(),
+                        context.tab_user_key.as_deref(),
+                    );
+                    console::push_line_to_tab(tab_id.as_str(), format!("Launch failed: {err}"));
+                }
                 state
                     .status_by_instance
                     .insert(update.instance_id, format!("Launch failed: {err}"));

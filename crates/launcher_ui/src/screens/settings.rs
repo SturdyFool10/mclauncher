@@ -99,6 +99,7 @@ fn render_settings_contents(
                 ],
             );
             render_java_runtime_settings(ui, text_ui, config);
+            render_curseforge_settings(ui, text_ui, config);
         },
     );
 
@@ -412,6 +413,20 @@ fn render_java_runtime_settings(ui: &mut Ui, text_ui: &mut TextUi, config: &mut 
         }
         ui.add_space(style::SPACE_MD);
     }
+}
+
+fn render_curseforge_settings(ui: &mut Ui, text_ui: &mut TextUi, config: &mut Config) {
+    let _ = settings_widgets::text_input_row(
+        text_ui,
+        ui,
+        "curseforge_api_key",
+        "CurseForge API Key",
+        Some(
+            "Optional. Overrides VERTEX_CURSEFORGE_API_KEY/CURSEFORGE_API_KEY and enables CurseForge browsing/download metadata.",
+        ),
+        config.curseforge_api_key_mut(),
+    );
+    ui.add_space(style::SPACE_MD);
 }
 
 fn render_instance_defaults_section(ui: &mut Ui, text_ui: &mut TextUi, config: &mut Config) {
