@@ -172,12 +172,26 @@ pub(crate) fn extract_authorization_code(
     let mut error_description = None;
 
     for (key, value) in parsed.query_pairs() {
-        match key.as_ref() {
-            "code" => code = Some(value.into_owned()),
-            "state" => state = Some(value.into_owned()),
-            "error" => error = Some(value.into_owned()),
-            "error_description" => error_description = Some(value.into_owned()),
-            _ => {}
+        capture_oauth_pair(
+            key.as_ref(),
+            value.as_ref(),
+            &mut code,
+            &mut state,
+            &mut error,
+            &mut error_description,
+        );
+    }
+
+    if let Some(fragment) = parsed.fragment() {
+        for (key, value) in url::form_urlencoded::parse(fragment.as_bytes()) {
+            capture_oauth_pair(
+                key.as_ref(),
+                value.as_ref(),
+                &mut code,
+                &mut state,
+                &mut error,
+                &mut error_description,
+            );
         }
     }
 
@@ -201,6 +215,23 @@ pub(crate) fn extract_authorization_code(
     code.ok_or_else(|| {
         AuthError::OAuth("Microsoft callback did not include an auth code".to_owned())
     })
+}
+
+fn capture_oauth_pair(
+    key: &str,
+    value: &str,
+    code: &mut Option<String>,
+    state: &mut Option<String>,
+    error: &mut Option<String>,
+    error_description: &mut Option<String>,
+) {
+    match key {
+        "code" => *code = Some(value.to_owned()),
+        "state" => *state = Some(value.to_owned()),
+        "error" => *error = Some(value.to_owned()),
+        "error_description" => *error_description = Some(value.to_owned()),
+        _ => {}
+    }
 }
 
 pub(crate) fn request_device_code(

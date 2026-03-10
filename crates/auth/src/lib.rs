@@ -119,11 +119,22 @@ pub fn login_finish(code: &str, flow: MinecraftLoginFlow) -> Result<CachedAccoun
         .map_err(|err| error::prefix_auth_error("GetOAuthToken", err))?;
 
     // Continue through Xbox -> XSTS -> Minecraft service token chain.
-    minecraft::complete_minecraft_login(
+    let account = minecraft::complete_minecraft_login(
         &agent,
         &microsoft_token.access_token,
         microsoft_token.refresh_token.as_deref(),
-    )
+    )?;
+    if account
+        .microsoft_refresh_token
+        .as_deref()
+        .map(str::trim)
+        .is_none_or(|value| value.is_empty())
+    {
+        return Err(AuthError::OAuth(
+            "Browser sign-in completed without a renewable Microsoft refresh token. This session would stop working after restart, so it was rejected. Use a client/app configuration that returns refresh tokens or switch to a renewable sign-in flow.".to_owned(),
+        ));
+    }
+    Ok(account)
 }
 
 /// Renews cached account sessions using stored Microsoft refresh tokens.
@@ -159,7 +170,6 @@ where
         else {
             tracing::info!(
                 target: "vertexlauncher/auth/renew",
-                display_name = %account.minecraft_profile.name,
                 "Skipping token renewal: no Microsoft refresh token cached."
             );
             continue;
@@ -179,14 +189,21 @@ where
                 )
             },
         ) {
-            Ok(renewed) => {
+            Ok(mut renewed) => {
+                if renewed
+                    .microsoft_refresh_token
+                    .as_deref()
+                    .map(str::trim)
+                    .is_none_or(|value| value.is_empty())
+                {
+                    renewed.microsoft_refresh_token = Some(refresh_token.to_owned());
+                }
                 on_event(CachedAccountRenewalEvent::Succeeded {
                     profile_id: renewed.minecraft_profile.id.clone(),
                     display_name: renewed.minecraft_profile.name.clone(),
                 });
                 tracing::info!(
                     target: "vertexlauncher/auth/renew",
-                    display_name = %renewed.minecraft_profile.name,
                     "Renewed cached account session."
                 );
                 *account = renewed;
@@ -200,7 +217,6 @@ where
                 });
                 tracing::warn!(
                     target: "vertexlauncher/auth/renew",
-                    display_name = %account.minecraft_profile.name,
                     error = %err,
                     "Failed to renew cached account session; keeping existing cached token."
                 );

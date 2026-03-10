@@ -39,6 +39,17 @@ pub(crate) fn run_device_code_login(
         &microsoft_token.access_token,
         microsoft_token.refresh_token.as_deref(),
     )?;
+    if account
+        .microsoft_refresh_token
+        .as_deref()
+        .map(str::trim)
+        .is_none_or(|value| value.is_empty())
+    {
+        tracing::warn!(
+            target: "vertexlauncher/auth/device_code",
+            "device-code login completed without a Microsoft refresh token; cached session will not be renewable"
+        );
+    }
     let _ = sender.send(LoginEvent::Completed(account));
     tracing::info!(
         target: "vertexlauncher/auth/device_code",

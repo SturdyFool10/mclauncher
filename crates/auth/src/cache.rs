@@ -345,7 +345,24 @@ fn persist_refresh_token(account: &mut CachedAccount) -> Result<(), AuthError> {
         .map(str::trim)
         .filter(|token| !token.is_empty())
     {
-        Some(token) => secret_store::store_refresh_token(profile_id, token)?,
+        Some(token) => {
+            secret_store::store_refresh_token(profile_id, token)?;
+            let stored_token = secret_store::load_refresh_token(profile_id)?;
+            let stored = stored_token
+                .as_deref()
+                .map(str::trim)
+                .filter(|stored| !stored.is_empty())
+                .ok_or_else(|| {
+                    AuthError::SecureStorage(format!(
+                        "Refresh token for profile '{profile_id}' was written to secure storage but could not be reloaded."
+                    ))
+                })?;
+            if stored != token {
+                return Err(AuthError::SecureStorage(format!(
+                    "Refresh token for profile '{profile_id}' did not round-trip correctly through secure storage."
+                )));
+            }
+        }
         None => secret_store::delete_refresh_token(profile_id)?,
     }
 
