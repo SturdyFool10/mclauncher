@@ -659,6 +659,7 @@ pub fn render(
     ui.add_space(8.0);
     match state.current_view {
         ContentBrowserPage::Browse => {
+            let manifest = load_content_manifest(instance_root.as_path());
             render_controls(ui, text_ui, instance.id.as_str(), &mut state);
 
             if state.auto_populated_instance_id.as_deref() != Some(instance.id.as_str())
@@ -684,6 +685,7 @@ pub fn render(
                 text_ui,
                 instance.id.as_str(),
                 &mut state,
+                &manifest,
                 results_height,
             );
             if let Some(page) = render_outcome.requested_page
@@ -850,11 +852,24 @@ struct ResultTileOutcome {
     download_clicked: bool,
 }
 
+struct IconButtonOutcome {
+    clicked: bool,
+    rect: egui::Rect,
+}
+
+struct ResultTileInnerOutcome {
+    open_clicked: bool,
+    download_clicked: bool,
+    download_button_rect: egui::Rect,
+    info_button_rect: egui::Rect,
+}
+
 fn render_results(
     ui: &mut Ui,
     text_ui: &mut TextUi,
     instance_id: &str,
     state: &mut ContentBrowserState,
+    manifest: &ContentInstallManifest,
     max_height: f32,
 ) -> RenderResultsOutcome {
     let mut outcome = RenderResultsOutcome::default();
@@ -936,8 +951,14 @@ fn render_results(
                         ui.add_space(6.0);
                     }
 
-                    let tile_outcome =
-                        render_result_tile(ui, text_ui, (instance_id, &entry.dedupe_key), entry);
+                    let download_enabled = !content_is_installed(manifest, entry);
+                    let tile_outcome = render_result_tile(
+                        ui,
+                        text_ui,
+                        (instance_id, &entry.dedupe_key),
+                        entry,
+                        download_enabled,
+                    );
                     if tile_outcome.download_clicked {
                         state.download_queue.push_back(QueuedContentDownload {
                             request: ContentInstallRequest::Latest {
@@ -1023,6 +1044,7 @@ fn render_result_tile(
     text_ui: &mut TextUi,
     id_source: impl std::hash::Hash + Copy,
     entry: &BrowserProjectEntry,
+    download_enabled: bool,
 ) -> ResultTileOutcome {
     let frame = egui::Frame::new()
         .fill(ui.visuals().widgets.inactive.bg_fill)
@@ -1033,6 +1055,8 @@ fn render_result_tile(
             let thumbnail_size = egui::vec2(96.0, 96.0);
             let mut open_clicked = false;
             let mut download_clicked = false;
+            let mut download_button_rect = egui::Rect::NOTHING;
+            let mut info_button_rect = egui::Rect::NOTHING;
             let action_cluster_width =
                 (TILE_ACTION_BUTTON_WIDTH * 2.0) + (TILE_ACTION_BUTTON_GAP_XS * 2.0);
 
@@ -1134,16 +1158,22 @@ fn render_result_tile(
                             (id_source, "download-svg").hash(&mut hasher);
                             let download_button_id =
                                 format!("content-browser-download-{}", hasher.finish());
-                            if render_rounded_icon_button(
+                            let download_button = render_rounded_icon_button(
                                 ui,
                                 download_button_id.as_str(),
                                 assets::DOWNLOAD_SVG,
-                                "Quick install latest compatible version",
+                                if download_enabled {
+                                    "Quick install latest compatible version"
+                                } else {
+                                    "Already installed"
+                                },
                                 ui.visuals().selection.bg_fill,
                                 TILE_ACTION_BUTTON_WIDTH,
                                 TILE_ACTION_BUTTON_HEIGHT,
-                                true,
-                            ) {
+                                download_enabled,
+                            );
+                            download_button_rect = download_button.rect;
+                            if download_button.clicked {
                                 download_clicked = true;
                             }
                             ui.add_space(TILE_ACTION_BUTTON_GAP_XS);
@@ -1151,7 +1181,7 @@ fn render_result_tile(
                             (id_source, "info-svg").hash(&mut info_hasher);
                             let info_button_id =
                                 format!("content-browser-info-{}", info_hasher.finish());
-                            if render_rounded_icon_button(
+                            let info_button = render_rounded_icon_button(
                                 ui,
                                 info_button_id.as_str(),
                                 assets::ADJUSTMENTS_SVG,
@@ -1160,7 +1190,9 @@ fn render_result_tile(
                                 TILE_ACTION_BUTTON_WIDTH,
                                 TILE_ACTION_BUTTON_HEIGHT,
                                 true,
-                            ) {
+                            );
+                            info_button_rect = info_button.rect;
+                            if info_button.clicked {
                                 open_clicked = true;
                             }
                         });
@@ -1191,7 +1223,12 @@ fn render_result_tile(
                 );
             });
 
-            (open_clicked, download_clicked)
+            ResultTileInnerOutcome {
+                open_clicked,
+                download_clicked,
+                download_button_rect,
+                info_button_rect,
+            }
         });
 
     let response = ui.interact(
@@ -1199,10 +1236,25 @@ fn render_result_tile(
         ui.make_persistent_id((id_source, "open_detail")),
         egui::Sense::click(),
     );
-    let (button_open_clicked, button_download_clicked) = frame.inner;
-    ResultTileOutcome {
-        open_clicked: button_open_clicked || (response.clicked() && !button_download_clicked),
+    let ResultTileInnerOutcome {
+        open_clicked: button_open_clicked,
         download_clicked: button_download_clicked,
+        download_button_rect,
+        info_button_rect,
+    } = frame.inner;
+    let pointer_pos = response.interact_pointer_pos();
+    let pointer_over_download =
+        response.clicked() && pointer_pos.is_some_and(|pos| download_button_rect.contains(pos));
+    let pointer_over_info =
+        response.clicked() && pointer_pos.is_some_and(|pos| info_button_rect.contains(pos));
+    let overlay_clicked_download = pointer_over_download && download_enabled;
+    let overlay_clicked_info = pointer_over_info;
+    let pointer_over_action_button = pointer_over_download || pointer_over_info;
+    ResultTileOutcome {
+        open_clicked: button_open_clicked
+            || overlay_clicked_info
+            || (response.clicked() && !button_download_clicked && !pointer_over_action_button),
+        download_clicked: button_download_clicked || overlay_clicked_download,
     }
 }
 
@@ -1671,7 +1723,9 @@ fn render_detail_versions_tab(
                                                 TILE_ACTION_BUTTON_WIDTH,
                                                 TILE_ACTION_BUTTON_HEIGHT,
                                                 enabled,
-                                            ) && enabled
+                                            )
+                                            .clicked
+                                                && enabled
                                             {
                                                 let requested_game_version = if state
                                                     .detail_minecraft_version_filter
@@ -1749,7 +1803,7 @@ fn render_rounded_icon_button(
     width: f32,
     height: f32,
     enabled: bool,
-) -> bool {
+) -> IconButtonOutcome {
     let text_color = ui.visuals().text_color();
     let themed_svg = themed_svg_bytes(svg_bytes, text_color);
     let uri = format!(
@@ -1791,7 +1845,10 @@ fn render_rounded_icon_button(
     let icon_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(icon_size, icon_size));
     let _ = ui.put(icon_rect, image);
 
-    response.on_hover_text(tooltip).clicked()
+    IconButtonOutcome {
+        clicked: response.on_hover_text(tooltip).clicked(),
+        rect,
+    }
 }
 
 fn themed_svg_bytes(svg_bytes: &[u8], color: egui::Color32) -> Vec<u8> {
@@ -1839,6 +1896,10 @@ fn version_row_action(
     } else {
         VersionRowAction::Switch
     }
+}
+
+fn content_is_installed(manifest: &ContentInstallManifest, entry: &BrowserProjectEntry) -> bool {
+    manifest.projects.contains_key(&entry.dedupe_key)
 }
 
 fn version_matches_loader(version: &BrowserVersionEntry, loader: BrowserLoader) -> bool {
