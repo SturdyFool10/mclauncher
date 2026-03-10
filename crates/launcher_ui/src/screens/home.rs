@@ -10,7 +10,7 @@ use base64::Engine;
 use config::Config;
 use egui::{Color32, Layout, Ui};
 use flate2::read::GzDecoder;
-use instances::{InstanceStore, instance_root_path, set_world_favorite};
+use instances::{InstanceStore, instance_root_path, set_server_favorite, set_world_favorite};
 use textui::{LabelOptions, TextUi};
 
 use crate::assets;
@@ -24,6 +24,9 @@ const SERVER_PINGS_PER_SCAN: usize = 3;
 const INSTANCE_ROW_HEIGHT: f32 = 34.0;
 const ACTIVITY_ROW_HEIGHT: f32 = 54.0;
 const ENTRY_ICON_SIZE: f32 = 14.0;
+const SERVER_PING_ICON_SIZE: f32 = 24.0;
+const FAVORITE_STAR_BUTTON_SIZE: f32 = 20.0;
+const FAVORITE_STAR_ICON_SIZE: f32 = 14.0;
 
 #[derive(Debug, Clone, Default)]
 pub struct HomeOutput {
@@ -62,10 +65,12 @@ struct ServerEntry {
     instance_name: String,
     server_name: String,
     address: String,
+    favorite_id: String,
     host: String,
     port: u16,
     icon_png: Option<Vec<u8>>,
     last_used_at_ms: Option<u64>,
+    favorite: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -311,13 +316,24 @@ fn render_activity_feed(
     }
 
     let now_ms = current_time_millis();
-    let mut favorites: Vec<&WorldEntry> =
-        state.worlds.iter().filter(|world| world.favorite).collect();
+    let mut favorites: Vec<HomeEntryRef<'_>> = state
+        .worlds
+        .iter()
+        .filter(|world| world.favorite)
+        .map(HomeEntryRef::World)
+        .collect();
+    favorites.extend(
+        state
+            .servers
+            .iter()
+            .filter(|server| server.favorite)
+            .map(HomeEntryRef::Server),
+    );
     favorites.sort_by(|a, b| {
-        b.last_used_at_ms
+        b.last_used_at_ms()
             .unwrap_or(0)
-            .cmp(&a.last_used_at_ms.unwrap_or(0))
-            .then_with(|| a.world_name.cmp(&b.world_name))
+            .cmp(&a.last_used_at_ms().unwrap_or(0))
+            .then_with(|| a.primary_label().cmp(b.primary_label()))
     });
 
     let mut entries: Vec<HomeEntryRef<'_>> = state
@@ -326,7 +342,13 @@ fn render_activity_feed(
         .filter(|world| !world.favorite)
         .map(HomeEntryRef::World)
         .collect();
-    entries.extend(state.servers.iter().map(HomeEntryRef::Server));
+    entries.extend(
+        state
+            .servers
+            .iter()
+            .filter(|server| !server.favorite)
+            .map(HomeEntryRef::Server),
+    );
     entries.sort_by(|a, b| {
         b.last_used_at_ms()
             .unwrap_or(0)
@@ -351,17 +373,33 @@ fn render_activity_feed(
                     },
                 );
                 ui.add_space(4.0);
-                for (index, world) in favorites.iter().enumerate() {
-                    render_world_row(
-                        ui,
-                        text_ui,
-                        world,
-                        now_ms,
-                        ("home_favorite_world", index),
-                        instances,
-                        output,
-                        requested_rescan,
-                    );
+                for (index, entry) in favorites.into_iter().enumerate() {
+                    match entry {
+                        HomeEntryRef::World(world) => render_world_row(
+                            ui,
+                            text_ui,
+                            world,
+                            now_ms,
+                            ("home_favorite_world", index),
+                            instances,
+                            output,
+                            requested_rescan,
+                        ),
+                        HomeEntryRef::Server(server) => render_server_row(
+                            ui,
+                            text_ui,
+                            server,
+                            state
+                                .server_pings
+                                .get(&normalize_server_address(&server.address)),
+                            now_ms,
+                            streamer_mode,
+                            ("home_favorite_server", index),
+                            instances,
+                            output,
+                            requested_rescan,
+                        ),
+                    }
                     ui.add_space(2.0);
                 }
                 ui.separator();
@@ -419,7 +457,9 @@ fn render_activity_feed(
                             now_ms,
                             streamer_mode,
                             ("home_recent_server", index),
+                            instances,
                             output,
+                            requested_rescan,
                         );
                     }
                 }
@@ -438,70 +478,90 @@ fn render_world_row(
     output: &mut HomeOutput,
     requested_rescan: &mut bool,
 ) {
-    ui.horizontal(|ui| {
-        let star_label = if world.favorite { "[*]" } else { "[ ]" };
-        if ui
-            .small_button(star_label)
-            .on_hover_text("Toggle world favorite")
-            .clicked()
-        {
-            let _ = set_world_favorite(
-                instances,
-                world.instance_id.as_str(),
-                world.world_id.as_str(),
-                !world.favorite,
+    let mut star_clicked = false;
+    let row_response =
+        render_clickable_entry_row(ui, (id_source, "row"), ACTIVITY_ROW_HEIGHT, |ui| {
+            if render_favorite_star_button(ui, (id_source, "world_star"), world.favorite)
+                .on_hover_text("Toggle world favorite")
+                .clicked()
+            {
+                star_clicked = true;
+            }
+            ui.add_space(8.0);
+            render_entry_thumbnail(
+                ui,
+                (id_source, "thumb"),
+                world.thumbnail_png.as_deref(),
+                assets::HOME_SVG,
+                34.0,
+                34.0,
             );
-            *requested_rescan = true;
-        }
-        let row_response =
-            render_clickable_entry_row(ui, (id_source, "row"), ACTIVITY_ROW_HEIGHT, |ui| {
-                render_entry_thumbnail(
+            ui.add_space(8.0);
+            let name_label_options = LabelOptions {
+                weight: 600,
+                color: ui.visuals().text_color(),
+                wrap: false,
+                ..LabelOptions::default()
+            };
+            let meta_label_options = LabelOptions {
+                color: ui.visuals().weak_text_color(),
+                wrap: false,
+                ..LabelOptions::default()
+            };
+            let text_max_width = ui.available_width().max(80.0);
+            let world_name = truncate_for_width(
+                ui,
+                text_ui,
+                world.world_name.as_str(),
+                &name_label_options,
+                text_max_width,
+            );
+            let world_meta = truncate_for_width(
+                ui,
+                text_ui,
+                world_meta_line(world, now_ms).as_str(),
+                &meta_label_options,
+                text_max_width,
+            );
+            ui.vertical(|ui| {
+                ui.set_max_width(text_max_width);
+                let _ = text_ui.label(
                     ui,
-                    (id_source, "thumb"),
-                    world.thumbnail_png.as_deref(),
-                    assets::HOME_SVG,
-                    34.0,
-                    34.0,
+                    (id_source, "name"),
+                    world_name.as_str(),
+                    &name_label_options,
                 );
-                ui.add_space(8.0);
-                ui.vertical(|ui| {
-                    let _ = text_ui.label(
-                        ui,
-                        (id_source, "name"),
-                        world.world_name.as_str(),
-                        &LabelOptions {
-                            weight: 600,
-                            color: ui.visuals().text_color(),
-                            wrap: false,
-                            ..LabelOptions::default()
-                        },
-                    );
-                    let _ = text_ui.label(
-                        ui,
-                        (id_source, "meta"),
-                        world_meta_line(world, now_ms).as_str(),
-                        &LabelOptions {
-                            color: ui.visuals().weak_text_color(),
-                            wrap: false,
-                            ..LabelOptions::default()
-                        },
-                    );
-                });
+                let _ = text_ui.label(
+                    ui,
+                    (id_source, "meta"),
+                    world_meta.as_str(),
+                    &meta_label_options,
+                );
             });
-        if row_response.clicked() {
-            queue_launch_intent(
-                ui.ctx(),
-                PendingLaunchIntent {
-                    nonce: current_time_millis(),
-                    instance_id: world.instance_id.clone(),
-                    quick_play_singleplayer: Some(world.world_id.clone()),
-                    quick_play_multiplayer: None,
-                },
-            );
-            output.selected_instance_id = Some(world.instance_id.clone());
-            output.requested_screen = Some(AppScreen::Library);
-        }
-    });
+        });
+    if star_clicked {
+        let _ = set_world_favorite(
+            instances,
+            world.instance_id.as_str(),
+            world.world_id.as_str(),
+            !world.favorite,
+        );
+        *requested_rescan = true;
+        return;
+    }
+    if row_response.clicked() {
+        queue_launch_intent(
+            ui.ctx(),
+            PendingLaunchIntent {
+                nonce: current_time_millis(),
+                instance_id: world.instance_id.clone(),
+                quick_play_singleplayer: Some(world.world_id.clone()),
+                quick_play_multiplayer: None,
+            },
+        );
+        output.selected_instance_id = Some(world.instance_id.clone());
+        output.requested_screen = Some(AppScreen::Library);
+    }
 }
 
 fn world_meta_line(world: &WorldEntry, now_ms: u64) -> String {
@@ -547,11 +607,21 @@ fn render_server_row(
     now_ms: u64,
     streamer_mode: bool,
     id_source: impl std::hash::Hash + Copy,
+    instances: &mut InstanceStore,
     output: &mut HomeOutput,
+    requested_rescan: &mut bool,
 ) {
     let server_meta_full = server_meta_line(server, ping, now_ms, streamer_mode);
+    let mut star_clicked = false;
     let row_response =
         render_clickable_entry_row(ui, (id_source, "row"), ACTIVITY_ROW_HEIGHT, |ui| {
+            if render_favorite_star_button(ui, (id_source, "server_star"), server.favorite)
+                .on_hover_text("Toggle server favorite")
+                .clicked()
+            {
+                star_clicked = true;
+            }
+            ui.add_space(8.0);
             render_entry_thumbnail(
                 ui,
                 (id_source, "thumb"),
@@ -561,30 +631,39 @@ fn render_server_row(
                 34.0,
             );
             ui.add_space(8.0);
+            let name_label_options = LabelOptions {
+                weight: 600,
+                color: ui.visuals().text_color(),
+                wrap: false,
+                ..LabelOptions::default()
+            };
             let meta_label_options = LabelOptions {
                 color: ui.visuals().weak_text_color(),
                 wrap: false,
                 ..LabelOptions::default()
             };
-            let meta_max_width = (ui.available_width() - 24.0).max(80.0);
+            let text_max_width = (ui.available_width() - SERVER_PING_ICON_SIZE - 8.0).max(80.0);
+            let server_name = truncate_for_width(
+                ui,
+                text_ui,
+                server.server_name.as_str(),
+                &name_label_options,
+                text_max_width,
+            );
             let server_meta = truncate_for_width(
                 ui,
                 text_ui,
                 server_meta_full.as_str(),
                 &meta_label_options,
-                meta_max_width,
+                text_max_width,
             );
             ui.vertical(|ui| {
+                ui.set_max_width(text_max_width);
                 let _ = text_ui.label(
                     ui,
                     (id_source, "name"),
-                    server.server_name.as_str(),
-                    &LabelOptions {
-                        weight: 600,
-                        color: ui.visuals().text_color(),
-                        wrap: false,
-                        ..LabelOptions::default()
-                    },
+                    server_name.as_str(),
+                    &name_label_options,
                 );
                 let _ = text_ui.label(
                     ui,
@@ -597,6 +676,16 @@ fn render_server_row(
                 render_server_ping_icon(ui, ping);
             });
         });
+    if star_clicked {
+        let _ = set_server_favorite(
+            instances,
+            server.instance_id.as_str(),
+            server.favorite_id.as_str(),
+            !server.favorite,
+        );
+        *requested_rescan = true;
+        return;
+    }
     if row_response.clicked() {
         queue_launch_intent(
             ui.ctx(),
@@ -689,7 +778,14 @@ fn render_clickable_entry_row(
             .id_salt(id_source)
             .max_rect(inner)
             .layout(Layout::left_to_right(egui::Align::Center)),
-        |ui| add_contents(ui),
+        |ui| {
+            let horizontal_clip = egui::Rect::from_min_max(
+                egui::pos2(inner.min.x, rect.min.y - 8.0),
+                egui::pos2(inner.max.x, rect.max.y + 13.0),
+            );
+            ui.set_clip_rect(horizontal_clip);
+            add_contents(ui)
+        },
     );
     response
 }
@@ -732,7 +828,8 @@ fn render_entry_thumbnail(
 }
 
 fn render_server_ping_icon(ui: &mut Ui, ping: Option<&ServerPingSnapshot>) {
-    let (icon, color, tip) = ping_icon_for_status(ping.map(|snapshot| snapshot.status));
+    let (icon, color, tip) =
+        ping_icon_for_status(ui.visuals(), ping.map(|snapshot| snapshot.status));
     let themed_svg = apply_color_to_svg(icon, color);
     let uri = format!(
         "bytes://home/server-ping/{:?}-{:02x}{:02x}{:02x}.svg",
@@ -743,35 +840,91 @@ fn render_server_ping_icon(ui: &mut Ui, ping: Option<&ServerPingSnapshot>) {
     );
     ui.add(
         egui::Image::from_bytes(uri, themed_svg)
-            .fit_to_exact_size(egui::vec2(16.0, 16.0))
+            .fit_to_exact_size(egui::vec2(SERVER_PING_ICON_SIZE, SERVER_PING_ICON_SIZE))
             .sense(egui::Sense::hover()),
     )
     .on_hover_text(tip);
 }
 
-fn ping_icon_for_status(status: Option<ServerPingStatus>) -> (&'static [u8], Color32, String) {
+fn render_favorite_star_button(
+    ui: &mut Ui,
+    id_source: impl std::hash::Hash + Copy,
+    active: bool,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(FAVORITE_STAR_BUTTON_SIZE, FAVORITE_STAR_BUTTON_SIZE),
+        egui::Sense::click(),
+    );
+    let star_fill = if active {
+        ui.visuals().warn_fg_color
+    } else {
+        ui.visuals().extreme_bg_color
+    };
+    let star_outline = ui.visuals().widgets.hovered.bg_stroke.color;
+    let themed_svg = apply_star_fill_and_stroke_svg(assets::STAR_SVG, star_fill, star_outline);
+    let uri = format!(
+        "bytes://home/favorite-star/{:?}-{:02x}{:02x}{:02x}-{:02x}{:02x}{:02x}.svg",
+        ui.id().with((id_source, active)),
+        star_fill.r(),
+        star_fill.g(),
+        star_fill.b(),
+        star_outline.r(),
+        star_outline.g(),
+        star_outline.b()
+    );
+    let icon_rect = egui::Rect::from_center_size(
+        rect.center(),
+        egui::vec2(FAVORITE_STAR_ICON_SIZE, FAVORITE_STAR_ICON_SIZE),
+    );
+    let mut icon_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(icon_rect)
+            .layout(Layout::left_to_right(egui::Align::Center)),
+    );
+    icon_ui.add(
+        egui::Image::from_bytes(uri, themed_svg)
+            .fit_to_exact_size(icon_rect.size())
+            .sense(egui::Sense::hover()),
+    );
+
+    response
+}
+
+fn ping_icon_for_status(
+    visuals: &egui::Visuals,
+    status: Option<ServerPingStatus>,
+) -> (&'static [u8], Color32, String) {
     match status.unwrap_or(ServerPingStatus::Unknown) {
         ServerPingStatus::Unknown => (
             assets::ANTENNA_BARS_OFF_SVG,
-            Color32::from_rgb(145, 145, 145),
+            visuals.weak_text_color().gamma_multiply(0.9),
             "Ping unknown".to_owned(),
         ),
         ServerPingStatus::Offline => (
             assets::ANTENNA_BARS_OFF_SVG,
-            Color32::from_rgb(205, 90, 90),
+            visuals.error_fg_color,
             "Server offline".to_owned(),
         ),
         ServerPingStatus::Online { latency_ms } => {
             let (icon, color) = if latency_ms <= 80 {
-                (assets::ANTENNA_BARS_5_SVG, Color32::from_rgb(80, 190, 110))
+                (assets::ANTENNA_BARS_5_SVG, visuals.text_cursor.stroke.color)
             } else if latency_ms <= 140 {
-                (assets::ANTENNA_BARS_4_SVG, Color32::from_rgb(120, 190, 90))
+                (
+                    assets::ANTENNA_BARS_4_SVG,
+                    visuals.text_cursor.stroke.color.gamma_multiply(0.9),
+                )
             } else if latency_ms <= 220 {
-                (assets::ANTENNA_BARS_3_SVG, Color32::from_rgb(195, 175, 90))
+                (
+                    assets::ANTENNA_BARS_3_SVG,
+                    visuals.warn_fg_color.gamma_multiply(0.85),
+                )
             } else if latency_ms <= 320 {
-                (assets::ANTENNA_BARS_2_SVG, Color32::from_rgb(210, 145, 80))
+                (assets::ANTENNA_BARS_2_SVG, visuals.warn_fg_color)
             } else {
-                (assets::ANTENNA_BARS_1_SVG, Color32::from_rgb(220, 110, 80))
+                (
+                    assets::ANTENNA_BARS_1_SVG,
+                    visuals.error_fg_color.gamma_multiply(0.92),
+                )
             };
             (icon, color, format!("Latency: {latency_ms}ms"))
         }
@@ -781,6 +934,21 @@ fn ping_icon_for_status(status: Option<ServerPingStatus>) -> (&'static [u8], Col
 fn apply_color_to_svg(svg_bytes: &[u8], color: Color32) -> Vec<u8> {
     let color_hex = format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b());
     let svg = String::from_utf8_lossy(svg_bytes).replace("currentColor", color_hex.as_str());
+    svg.into_bytes()
+}
+
+fn apply_star_fill_and_stroke_svg(svg_bytes: &[u8], fill: Color32, stroke: Color32) -> Vec<u8> {
+    let fill_hex = format!("#{:02x}{:02x}{:02x}", fill.r(), fill.g(), fill.b());
+    let stroke_hex = format!("#{:02x}{:02x}{:02x}", stroke.r(), stroke.g(), stroke.b());
+    let mut svg = String::from_utf8_lossy(svg_bytes).replace("currentColor", fill_hex.as_str());
+    svg = svg.replace(
+        "<path d=\"M8.243",
+        format!(
+            "<path fill=\"{}\" stroke=\"{}\" stroke-width=\"1.0\" stroke-linejoin=\"round\" paint-order=\"stroke\" d=\"M8.243",
+            fill_hex, stroke_hex
+        )
+        .as_str(),
+    );
     svg.into_bytes()
 }
 
@@ -855,16 +1023,22 @@ fn collect_servers(instances: &InstanceStore, installations_root: &Path) -> Vec<
         let last_used_at_ms = modified_millis(servers_dat.as_path());
         let parsed = parse_servers_dat(servers_dat.as_path()).unwrap_or_default();
         for server in parsed {
+            let favorite_id = normalize_server_address(server.ip.as_str());
             let (host, port) = split_server_address(server.ip.as_str());
             servers.push(ServerEntry {
                 instance_id: instance.id.clone(),
                 instance_name: instance.name.clone(),
                 server_name: server.name,
                 address: server.ip,
+                favorite_id: favorite_id.clone(),
                 host,
                 port,
                 icon_png: decode_server_icon(server.icon.as_deref()),
                 last_used_at_ms,
+                favorite: instance
+                    .favorite_server_ids
+                    .iter()
+                    .any(|id| id == &favorite_id),
             });
         }
     }

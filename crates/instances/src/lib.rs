@@ -90,6 +90,7 @@ pub struct InstanceRecord {
     pub launch_count: u64,
     pub last_launched_at_ms: Option<u64>,
     pub favorite_world_ids: Vec<String>,
+    pub favorite_server_ids: Vec<String>,
 }
 
 impl Default for InstanceRecord {
@@ -110,6 +111,7 @@ impl Default for InstanceRecord {
             launch_count: 0,
             last_launched_at_ms: None,
             favorite_world_ids: Vec::new(),
+            favorite_server_ids: Vec::new(),
         }
     }
 }
@@ -288,6 +290,7 @@ pub fn create_instance(
         launch_count: 0,
         last_launched_at_ms: None,
         favorite_world_ids: Vec::new(),
+        favorite_server_ids: Vec::new(),
     };
 
     store.instances.push(instance.clone());
@@ -416,6 +419,38 @@ pub fn set_world_favorite(
         instance
             .favorite_world_ids
             .retain(|entry| entry != normalized_world_id);
+    }
+    Ok(())
+}
+
+/// Toggles a server favorite for an instance by normalized server identifier.
+pub fn set_server_favorite(
+    store: &mut InstanceStore,
+    id: &str,
+    server_id: &str,
+    favorite: bool,
+) -> Result<(), InstanceError> {
+    let normalized_server_id = server_id.trim();
+    if normalized_server_id.is_empty() {
+        return Ok(());
+    }
+    let instance = store
+        .find_mut(id)
+        .ok_or_else(|| InstanceError::MissingInstance(id.to_owned()))?;
+    if favorite {
+        if !instance
+            .favorite_server_ids
+            .iter()
+            .any(|entry| entry == normalized_server_id)
+        {
+            instance
+                .favorite_server_ids
+                .push(normalized_server_id.to_owned());
+        }
+    } else {
+        instance
+            .favorite_server_ids
+            .retain(|entry| entry != normalized_server_id);
     }
     Ok(())
 }
@@ -561,6 +596,7 @@ fn normalize_instance(instance: &mut InstanceRecord) {
         instance.java_override_runtime_major,
     );
     instance.favorite_world_ids = normalize_world_favorites(&instance.favorite_world_ids);
+    instance.favorite_server_ids = normalize_world_favorites(&instance.favorite_server_ids);
 
     if instance.id.trim().is_empty() {
         instance.id = next_instance_id();
