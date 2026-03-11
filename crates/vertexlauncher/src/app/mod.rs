@@ -310,7 +310,11 @@ impl eframe::App for VertexApp {
             },
         );
         if self.active_screen != screens::AppScreen::Instance {
-            notification::render_popups(ctx, &mut self.text_ui);
+            notification::render_popups(
+                ctx,
+                &mut self.text_ui,
+                self.config.notification_expiry_bars_empty_left(),
+            );
         }
 
         if top_bar_output.start_sign_in {

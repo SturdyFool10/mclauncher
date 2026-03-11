@@ -251,6 +251,7 @@ pub enum ToggleSettingId {
     StreamerModeEnabled,
     WindowBlurEnabled,
     OpenTypeFeaturesEnabled,
+    NotificationExpiryBarsEmptyLeft,
     SkinPreviewFreshFormatEnabled,
     SkinPreview3dLayersEnabled,
     SnapshotsAndBetasEnabled,
@@ -295,6 +296,13 @@ impl ToggleSettingId {
                 label: "Enable OpenType Features",
                 info_tooltip: Some(
                     "When enabled and the list below is empty, defaults to liga, calt.",
+                ),
+            },
+            ToggleSettingId::NotificationExpiryBarsEmptyLeft => ToggleSettingSpec {
+                id: ToggleSettingId::NotificationExpiryBarsEmptyLeft,
+                label: "Empty Expiry Bars to the Left",
+                info_tooltip: Some(
+                    "Notification expiry bars drain from left to right instead of right to left.",
                 ),
             },
             ToggleSettingId::SkinPreviewFreshFormatEnabled => ToggleSettingSpec {
@@ -519,6 +527,7 @@ pub struct Config {
     theme_id: String,
     open_type_features_enabled: bool,
     open_type_features_to_enable: String,
+    notification_expiry_bars_empty_left: bool,
     ui_font_family: UiFontFamily,
     skin_preview_aa_mode: SkinPreviewAaMode,
     skin_preview_msaa_samples: i32,
@@ -682,6 +691,10 @@ impl Config {
     /// Returns comma-separated OpenType feature tags configured by user.
     pub fn open_type_features_to_enable(&self) -> &str {
         &self.open_type_features_to_enable
+    }
+
+    pub fn notification_expiry_bars_empty_left(&self) -> bool {
+        self.notification_expiry_bars_empty_left
     }
 
     /// Returns configured UI font size in points.
@@ -873,6 +886,7 @@ impl Config {
             theme_id: _,
             open_type_features_enabled,
             open_type_features_to_enable: _,
+            notification_expiry_bars_empty_left,
             ui_font_family: _,
             skin_preview_aa_mode: _,
             skin_preview_msaa_samples: _,
@@ -918,6 +932,10 @@ impl Config {
             open_type_features_enabled,
         );
         visit(
+            ToggleSettingId::NotificationExpiryBarsEmptyLeft.spec(),
+            notification_expiry_bars_empty_left,
+        );
+        visit(
             ToggleSettingId::SkinPreviewFreshFormatEnabled.spec(),
             skin_preview_fresh_format_enabled,
         );
@@ -952,6 +970,7 @@ impl Config {
             theme_id: _,
             open_type_features_enabled: _,
             open_type_features_to_enable: _,
+            notification_expiry_bars_empty_left: _,
             ui_font_family,
             skin_preview_aa_mode: _,
             skin_preview_msaa_samples: _,
@@ -993,6 +1012,7 @@ impl Config {
             theme_id: _,
             open_type_features_enabled: _,
             open_type_features_to_enable: _,
+            notification_expiry_bars_empty_left: _,
             ui_font_family: _,
             skin_preview_aa_mode: _,
             skin_preview_msaa_samples: _,
@@ -1042,6 +1062,7 @@ impl Config {
             theme_id: _,
             open_type_features_enabled: _,
             open_type_features_to_enable: _,
+            notification_expiry_bars_empty_left: _,
             ui_font_family: _,
             skin_preview_aa_mode: _,
             skin_preview_motion_blur_enabled: _,
@@ -1092,6 +1113,7 @@ impl Config {
             theme_id: _,
             open_type_features_enabled: _,
             open_type_features_to_enable,
+            notification_expiry_bars_empty_left: _,
             ui_font_family: _,
             skin_preview_aa_mode: _,
             skin_preview_msaa_samples: _,
@@ -1153,6 +1175,7 @@ impl Default for Config {
             theme_id: "matrix_oled".to_owned(),
             open_type_features_enabled: true,
             open_type_features_to_enable: String::new(),
+            notification_expiry_bars_empty_left: false,
             ui_font_family: UiFontFamily::MapleMonoNf,
             skin_preview_aa_mode: SkinPreviewAaMode::Fxaa,
             skin_preview_msaa_samples: 4,

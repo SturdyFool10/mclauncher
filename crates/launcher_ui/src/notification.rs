@@ -254,7 +254,7 @@ fn drain_notifications() {
     }
 }
 
-pub fn render_popups(ctx: &egui::Context, text_ui: &mut TextUi) {
+pub fn render_popups(ctx: &egui::Context, text_ui: &mut TextUi, expiry_bars_empty_left: bool) {
     drain_notifications();
 
     let entries = {
@@ -303,13 +303,18 @@ pub fn render_popups(ctx: &egui::Context, text_ui: &mut TextUi) {
                             ui.visuals().widgets.inactive.bg_fill,
                         );
                         if expiry_progress > 0.0 {
-                            let filled_rect = egui::Rect::from_min_max(
-                                bar_rect.min,
-                                egui::pos2(
-                                    bar_rect.min.x + bar_rect.width() * expiry_progress,
-                                    bar_rect.max.y,
-                                ),
-                            );
+                            let fill_width = bar_rect.width() * expiry_progress;
+                            let filled_rect = if expiry_bars_empty_left {
+                                egui::Rect::from_min_max(
+                                    egui::pos2(bar_rect.max.x - fill_width, bar_rect.min.y),
+                                    bar_rect.max,
+                                )
+                            } else {
+                                egui::Rect::from_min_max(
+                                    bar_rect.min,
+                                    egui::pos2(bar_rect.min.x + fill_width, bar_rect.max.y),
+                                )
+                            };
                             ui.painter().rect_filled(
                                 filled_rect,
                                 CornerRadius::same(2),

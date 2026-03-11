@@ -52,6 +52,7 @@ fn render_settings_contents(
                     config::ToggleSettingId::StreamerModeEnabled,
                     config::ToggleSettingId::WindowBlurEnabled,
                     config::ToggleSettingId::OpenTypeFeaturesEnabled,
+                    config::ToggleSettingId::NotificationExpiryBarsEmptyLeft,
                     config::ToggleSettingId::SkinPreview3dLayersEnabled,
                 ],
             );
