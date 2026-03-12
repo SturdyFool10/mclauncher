@@ -10,7 +10,7 @@ over on the right of our github, we offer release builds for download, they are 
 
 if you choose to build from source, you will need to have a couple of things installed:
 - Rust toolchain (stable)
-  this will require a C/C++ linker to be installed, you can get this from the Visual Studio Community installer by checking `Build Desktop Applications in C++` and installing visual studio 
+    - **[NOTE]**: This requires a C/C++ linker to be installed. You can get this from the Visual Studio Community installer by checking `Build Desktop Applications in C++` and installing Visual Studio.
 - Cargo (Rust package manager)
 - Git (for cloning the repository)
 
