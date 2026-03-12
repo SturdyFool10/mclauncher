@@ -1,9 +1,53 @@
 [![Discord](https://img.shields.io/discord/1480105103414530190?label=Discord%20Members&logo=discord)](https://discord.gg/EJGUFeuGrN)
 # Vertex Launcher
 
-Native Minecraft launcher infrastructure written in Rust.
+Native Minecraft launcher written in Rust.
 
 Vertex Launcher is a multi-crate workspace that provides a desktop launcher, a quick-launch CLI, account handling, instance management, runtime/bootstrap logic, and in-app content discovery for the current Minecraft mod ecosystem.
+
+## Installation
+over on the right of our github, we offer release builds for download, they are all come with a .sig file which was signed by one of our maintainers, ensuring the authenticity of the build, to learn more google how to verify a PGP signature, we recommend using Kleopatra.
+
+if you choose to build from source, you will need to have a couple of things installed:
+- Rust toolchain (stable)
+  this will require a C/C++ linker to be installed, you can get this from the Visual Studio Community installer by checking `Build Desktop Applications in C++` and installing visual studio 
+- Cargo (Rust package manager)
+- Git (for cloning the repository)
+
+## Linux Build Prerequisites
+
+On Linux, you need native development libraries for `gtk`, `glib`, and `webkit` before `cargo build` will succeed. we use these to handle logins without being able to read your username or password, all we see is a refresh token and a active session token when we log in.
+
+For Debian/Ubuntu:
+
+```sh
+sudo apt-get update
+sudo apt-get install -y --no-install-recommends \
+  pkg-config \
+  libglib2.0-dev \
+  libgtk-3-dev \
+  libgdk-pixbuf-2.0-dev \
+  libpango1.0-dev \
+  libatk1.0-dev \
+  libcairo2-dev \
+  libsoup-3.0-dev \
+  libwebkit2gtk-4.1-dev \
+  libjavascriptcoregtk-4.1-dev
+```
+
+If your distro ships `4.0` instead of `4.1`, use:
+
+- `libwebkit2gtk-4.0-dev`
+- `libjavascriptcoregtk-4.0-dev`
+
+once you have everything installed, clone the repository, open a shell inside the root of the repo, and trigger a build with:
+```sh
+cargo build --release
+```
+this should produce a release build of the application which should appear in the `target/release` directory. this binary is compiled to bundle everything it needs within itself, so you can move it around wherever you like and it should work without any issues.
+
+On Wayland, the desktop app ID is `vertexlauncher`, this will allow you to set an icon and other desktop integration features, a copy of the svg icon we use is included in the repository to help. 
+
 
 ## Current Capabilities
 
@@ -83,35 +127,3 @@ The project is aimed at a practical native launcher with enough control for powe
 ## Building
 
 There is no packaged installer yet. Build from source:
-
-```sh
-cargo build --release
-```
-
-## Linux Build Prerequisites
-
-On Linux, you need native development libraries for `gtk`, `glib`, and `webkit` before `cargo build` will succeed.
-
-For Debian/Ubuntu:
-
-```sh
-sudo apt-get update
-sudo apt-get install -y --no-install-recommends \
-  pkg-config \
-  libglib2.0-dev \
-  libgtk-3-dev \
-  libgdk-pixbuf-2.0-dev \
-  libpango1.0-dev \
-  libatk1.0-dev \
-  libcairo2-dev \
-  libsoup-3.0-dev \
-  libwebkit2gtk-4.1-dev \
-  libjavascriptcoregtk-4.1-dev
-```
-
-If your distro ships `4.0` instead of `4.1`, use:
-
-- `libwebkit2gtk-4.0-dev`
-- `libjavascriptcoregtk-4.0-dev`
-
-On Wayland, the desktop app ID is `vertexlauncher`.
