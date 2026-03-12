@@ -6,7 +6,7 @@ Native Minecraft launcher written in Rust.
 Vertex Launcher is a multi-crate workspace that provides a desktop launcher, a quick-launch CLI, account handling, instance management, runtime/bootstrap logic, and in-app content discovery for the current Minecraft mod ecosystem.
 
 ## Installation
-over on the right of our github, we offer release builds for download, they are all come with a .sig file which was signed by one of our maintainers, ensuring the authenticity of the build, to learn more google how to verify a PGP signature, we recommend using Kleopatra.
+On the right side of our GitHub page, we provide release builds for download. Each release includes a `.sig` file signed by one of our maintainers so you can verify the build's authenticity; if you are not familiar with PGP signature verification, we recommend looking up how to verify a PGP signature with Kleopatra.
 
 if you choose to build from source, you will need to have a couple of things installed:
 - Rust toolchain (stable)
