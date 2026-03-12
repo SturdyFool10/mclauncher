@@ -137,6 +137,7 @@ Our goal is to provide a high-quality, secure, and reliable launcher for Minecra
   - who they voted for
   - who they affiliate with
 - try to allow people to continue using this launcher after they have been banned from Minecraft
+- collect data for resale
 
 We care about community trust, and above that as well, I as the owner of this project hate pirates, that is all anyone needs to know.
-Free speech is a core value of this project, and we will never censor or ban people for their opinions.
+Free speech is a core value of this project, and we will never censor or ban people for their opinions. Mojang is ultimately the arbiter of whom gets banned and why, it is not our place to either help nor hinder with their decisions.
