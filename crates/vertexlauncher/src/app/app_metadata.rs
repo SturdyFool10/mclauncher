@@ -1,5 +1,5 @@
 use launcher_ui::screens::SettingsInfo;
-use std::{fs, sync::OnceLock};
+use std::sync::OnceLock;
 
 #[derive(Debug, Clone)]
 struct GraphicsInfo {
@@ -66,6 +66,8 @@ fn clean_value(value: &str) -> String {
 
 #[cfg(target_os = "linux")]
 fn detect_cpu_name() -> String {
+    use std::fs;
+
     fs::read_to_string("/proc/cpuinfo")
         .ok()
         .and_then(|contents| {
@@ -93,6 +95,8 @@ fn detect_cpu_name() -> String {
 
 #[cfg(target_os = "linux")]
 fn detect_total_memory() -> String {
+    use std::fs;
+
     fs::read_to_string("/proc/meminfo")
         .ok()
         .and_then(|contents| {
