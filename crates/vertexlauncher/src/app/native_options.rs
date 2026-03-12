@@ -2,7 +2,7 @@ use config::Config;
 use eframe::{self, egui};
 use std::sync::Arc;
 
-use super::app_icon;
+use super::{app_icon, app_metadata};
 
 pub fn build(startup_config: &Config) -> eframe::NativeOptions {
     let startup_power_preference = if startup_config.low_power_gpu_preferred() {
@@ -49,6 +49,11 @@ pub fn build(startup_config: &Config) -> eframe::NativeOptions {
                     native_adapter_selector: None,
                     device_descriptor: Arc::new(|adapter| {
                         let info = adapter.get_info();
+                        app_metadata::record_graphics_adapter(
+                            &info.name,
+                            &info.driver,
+                            &info.driver_info,
+                        );
                         tracing::info!(
                             target: "vertexlauncher/app/graphics",
                             "Selected graphics adapter: {} backend={:?} type={:?} vendor=0x{:04x} device=0x{:04x}",

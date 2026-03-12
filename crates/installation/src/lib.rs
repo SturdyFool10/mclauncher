@@ -3405,7 +3405,8 @@ fn download_file_simple(url: &str, destination: &Path) -> Result<(), Installatio
         .header("User-Agent", OPENJDK_USER_AGENT)
         .call()
         .map_err(map_ureq_error)?;
-    let mut reader = response.into_body().into_reader();
+    let (_, body) = response.into_parts();
+    let mut reader = body.into_reader();
     let temp = destination.with_extension("downloading");
     let mut file = fs_file_create(&temp)?;
     let mut buffer = [0u8; 128 * 1024];

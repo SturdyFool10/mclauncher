@@ -71,6 +71,15 @@ pub struct LaunchAuthContext {
     pub user_type: String,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct SettingsInfo {
+    pub cpu: String,
+    pub gpu: String,
+    pub memory: String,
+    pub graphics_driver: String,
+    pub app_version: String,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct PendingLaunchIntent {
     pub nonce: u64,
@@ -106,6 +115,7 @@ pub fn render(
     skin_preview_msaa_samples: u32,
     available_ui_fonts: &[UiFontFamily],
     available_themes: &[Theme],
+    settings_info: &SettingsInfo,
     text_ui: &mut TextUi,
 ) -> ScreenOutput {
     let content_browser_open_id = ui.make_persistent_id("content_browser_open_state");
@@ -189,7 +199,14 @@ pub fn render(
             ScreenOutput::default()
         }
         AppScreen::Settings => {
-            settings::render(ui, text_ui, config, available_ui_fonts, available_themes);
+            settings::render(
+                ui,
+                text_ui,
+                config,
+                available_ui_fonts,
+                available_themes,
+                settings_info,
+            );
             ScreenOutput::default()
         }
         AppScreen::Legal => {

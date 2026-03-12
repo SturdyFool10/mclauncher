@@ -28,6 +28,7 @@ use self::config_format_modal::ModalAction;
 use self::fonts::FontController;
 
 mod app_icon;
+mod app_metadata;
 mod auth_state;
 mod cli;
 mod config_format_modal;
@@ -379,6 +380,7 @@ impl eframe::App for VertexApp {
         let mut screen_output = screens::ScreenOutput::default();
         let wgpu_target_format = frame.wgpu_render_state().map(|state| state.target_format);
         let skin_preview_msaa_samples = 4;
+        let settings_info = app_metadata::settings_info();
         let skin_manager_opened = self.active_screen == screens::AppScreen::Skins
             && self.last_rendered_screen != Some(screens::AppScreen::Skins);
         let skin_manager_account_switched =
@@ -423,6 +425,7 @@ impl eframe::App for VertexApp {
                     skin_preview_msaa_samples,
                     self.fonts.available_ui_fonts(),
                     self.theme_catalog.themes(),
+                    &settings_info,
                     &mut self.text_ui,
                 );
             });

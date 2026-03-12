@@ -467,7 +467,8 @@ fn fetch_texture_base64(agent: &ureq::Agent, url: &str) -> Option<String> {
         .ok()?;
 
     let mut bytes = Vec::new();
-    let mut reader = response.into_body().into_reader();
+    let (_, body) = response.into_parts();
+    let mut reader = body.into_reader();
     if reader.read_to_end(&mut bytes).is_err() || bytes.is_empty() {
         return None;
     }
@@ -498,7 +499,8 @@ pub(crate) fn resolve_cached_account_avatar(
         .call()
         .map_err(map_http_error)?;
     let mut bytes = Vec::new();
-    let mut reader = response.into_body().into_reader();
+    let (_, body) = response.into_parts();
+    let mut reader = body.into_reader();
     reader.read_to_end(&mut bytes)?;
     if bytes.is_empty() {
         return Ok(None);

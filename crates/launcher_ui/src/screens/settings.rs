@@ -8,6 +8,7 @@ use installation::purge_cache as purge_installation_cache;
 use std::sync::OnceLock;
 use textui::{ButtonOptions, TextUi};
 
+use super::SettingsInfo;
 use crate::ui::{components::settings_widgets, style, theme::Theme};
 
 const RESERVED_SYSTEM_MEMORY_MIB: u128 = 4 * 1024;
@@ -19,12 +20,20 @@ pub fn render(
     config: &mut Config,
     available_ui_fonts: &[UiFontFamily],
     available_themes: &[Theme],
+    settings_info: &SettingsInfo,
 ) {
     egui::ScrollArea::vertical()
         .id_salt("settings_page_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            render_settings_contents(ui, text_ui, config, available_ui_fonts, available_themes);
+            render_settings_contents(
+                ui,
+                text_ui,
+                config,
+                available_ui_fonts,
+                available_themes,
+                settings_info,
+            );
         });
 }
 
@@ -34,6 +43,7 @@ fn render_settings_contents(
     config: &mut Config,
     available_ui_fonts: &[UiFontFamily],
     available_themes: &[Theme],
+    settings_info: &SettingsInfo,
 ) {
     render_settings_section(
         ui,
@@ -106,6 +116,83 @@ fn render_settings_contents(
     );
 
     render_instance_defaults_section(ui, text_ui, config);
+    render_info_section(ui, text_ui, settings_info);
+}
+
+fn render_info_section(ui: &mut Ui, text_ui: &mut TextUi, settings_info: &SettingsInfo) {
+    render_settings_section(
+        ui,
+        text_ui,
+        "Info",
+        "Runtime and hardware information for this installation.",
+        |ui, text_ui| {
+            let mut key_style = style::muted(ui);
+            key_style.weight = 700;
+            key_style.wrap = false;
+
+            let mut value_style = style::body(ui);
+            value_style.monospace = true;
+
+            egui::Grid::new("settings_info_grid")
+                .num_columns(2)
+                .spacing([16.0, 8.0])
+                .show(ui, |ui| {
+                    render_info_row(
+                        text_ui,
+                        ui,
+                        "CPU",
+                        &settings_info.cpu,
+                        &key_style,
+                        &value_style,
+                    );
+                    render_info_row(
+                        text_ui,
+                        ui,
+                        "GPU",
+                        &settings_info.gpu,
+                        &key_style,
+                        &value_style,
+                    );
+                    render_info_row(
+                        text_ui,
+                        ui,
+                        "Memory",
+                        &settings_info.memory,
+                        &key_style,
+                        &value_style,
+                    );
+                    render_info_row(
+                        text_ui,
+                        ui,
+                        "Graphics Driver + Version",
+                        &settings_info.graphics_driver,
+                        &key_style,
+                        &value_style,
+                    );
+                    render_info_row(
+                        text_ui,
+                        ui,
+                        "App Version + Commit Hash",
+                        &settings_info.app_version,
+                        &key_style,
+                        &value_style,
+                    );
+                });
+        },
+    );
+}
+
+fn render_info_row(
+    text_ui: &mut TextUi,
+    ui: &mut Ui,
+    label: &str,
+    value: &str,
+    key_style: &textui::LabelOptions,
+    value_style: &textui::LabelOptions,
+) {
+    let _ = text_ui.label(ui, ("settings_info_label", label), label, key_style);
+    let _ = text_ui.label(ui, ("settings_info_value", label), value, value_style);
+    ui.end_row();
 }
 
 fn render_settings_section(
