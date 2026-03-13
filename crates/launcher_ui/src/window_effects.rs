@@ -25,7 +25,7 @@ mod windows {
     use windows_sys::Win32::Foundation::HWND;
     use windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute;
 
-    const DWMWA_SYSTEMBACKDROP_TYPE: u32 = 38;
+    const DWMWA_SYSTEMBACKDROP_TYPE: i32 = 38;
     const DWMSBT_TRANSIENTWINDOW: i32 = 3;
 
     pub fn apply(cc: &CreationContext<'_>) -> Result<(), String> {
