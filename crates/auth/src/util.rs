@@ -3,6 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD as BASE64_STANDARD, URL_SAFE_NO_PAD};
+use rand::RngCore;
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 
@@ -23,8 +24,10 @@ pub(crate) fn pkce_challenge(verifier: &str) -> String {
 
 pub(crate) fn generate_random_token(length: usize) -> String {
     let mut out = Vec::with_capacity(length);
+    let mut rng = rand::thread_rng();
     while out.len() < length {
-        let chunk: [u8; 48] = rand::random();
+        let mut chunk = [0_u8; 48];
+        rng.fill_bytes(&mut chunk);
         let encoded = URL_SAFE_NO_PAD.encode(chunk);
         out.extend_from_slice(encoded.as_bytes());
     }
