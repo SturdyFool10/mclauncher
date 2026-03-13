@@ -1,0 +1,18 @@
+use std::collections::BTreeMap;
+
+use crate::VtmpackProviderMode;
+
+#[derive(Debug, Clone)]
+pub struct VtmpackExportOptions {
+    pub provider_mode: VtmpackProviderMode,
+    pub included_root_entries: BTreeMap<String, bool>,
+}
+
+impl Default for VtmpackExportOptions {
+    fn default() -> Self {
+        Self {
+            provider_mode: VtmpackProviderMode::IncludeCurseForge,
+            included_root_entries: BTreeMap::new(),
+        }
+    }
+}

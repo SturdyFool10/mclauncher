@@ -1,0 +1,11 @@
+[package]
+name = "vtmpack"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+managed_content.workspace = true
+serde.workspace = true
+toml.workspace = true
+tar = "*"
+xz2 = "*"
