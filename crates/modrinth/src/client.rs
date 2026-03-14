@@ -187,6 +187,29 @@ impl Client {
         Ok(project.into_project())
     }
 
+    /// Fetches multiple project records by ID or slug.
+    pub fn get_projects(
+        &self,
+        project_ids_or_slugs: &[String],
+    ) -> Result<Vec<Project>, ModrinthError> {
+        let ids = prepare_string_ids(project_ids_or_slugs);
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        debug!(
+            target: "vertexlauncher/modrinth",
+            projects = ids.len(),
+            "fetching Modrinth projects in batch"
+        );
+        let ids_json = serde_json::to_string(&ids).map_err(ModrinthError::Json)?;
+        let records: Vec<ProjectRecord> = self.get_json("/projects", &[("ids", ids_json)])?;
+        Ok(records
+            .into_iter()
+            .map(ProjectRecord::into_project)
+            .collect())
+    }
+
     /// Lists compatible versions for a project.
     ///
     /// - `project_id_or_slug`: Modrinth project ID or slug.
@@ -245,6 +268,30 @@ impl Client {
         let path = format!("/version/{version_id}");
         let version: ProjectVersionRecord = self.get_json(path.as_str(), &[])?;
         Ok(version.into_project_version())
+    }
+
+    /// Fetches multiple version records by ID.
+    pub fn get_versions(
+        &self,
+        version_ids: &[String],
+    ) -> Result<Vec<ProjectVersion>, ModrinthError> {
+        let ids = prepare_string_ids(version_ids);
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        debug!(
+            target: "vertexlauncher/modrinth",
+            versions = ids.len(),
+            "fetching Modrinth versions in batch"
+        );
+        let ids_json = serde_json::to_string(&ids).map_err(ModrinthError::Json)?;
+        let records: Vec<ProjectVersionRecord> =
+            self.get_json("/versions", &[("ids", ids_json)])?;
+        Ok(records
+            .into_iter()
+            .map(ProjectVersionRecord::into_project_version)
+            .collect())
     }
 
     pub fn get_versions_from_hashes(
@@ -595,6 +642,18 @@ fn prepare_hashes(hashes: &[String]) -> Vec<String> {
         .map(normalize_hash)
         .filter(|hash| !hash.is_empty())
         .collect()
+}
+
+fn prepare_string_ids(values: &[String]) -> Vec<String> {
+    let mut prepared = Vec::new();
+    for value in values {
+        let trimmed = value.trim();
+        if trimmed.is_empty() || prepared.iter().any(|existing| existing == trimmed) {
+            continue;
+        }
+        prepared.push(trimmed.to_owned());
+    }
+    prepared
 }
 
 fn normalize_hash(value: &str) -> String {

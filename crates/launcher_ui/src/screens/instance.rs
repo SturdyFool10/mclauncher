@@ -153,6 +153,10 @@ pub fn render(
 
     let installations_root = std::path::PathBuf::from(config.minecraft_installations_root());
     let instance_root_path = instances::instance_root_path(&installations_root, &instance_snapshot);
+    let content_download_policy = DownloadPolicy {
+        max_concurrent_downloads: config.download_max_concurrent().max(1),
+        max_download_bps: config.parsed_download_speed_limit_bps(),
+    };
 
     let _ = text_ui.label(
         ui,
@@ -218,6 +222,7 @@ pub fn render(
         text_ui,
         instance_id,
         instance_root_path.as_path(),
+        &content_download_policy,
         &mut state,
         &mut output,
     );

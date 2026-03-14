@@ -29,8 +29,10 @@ where
         let module_path = format_module_path(meta.target(), meta.file());
         let message = if visitor.message.is_empty() {
             visitor.fields
-        } else {
+        } else if visitor.fields.is_empty() {
             visitor.message
+        } else {
+            format!("{} {}", visitor.message, visitor.fields)
         };
         let line = if should_omit_module_path(meta.target(), &module_path) {
             format!("[{date}][{time}][{level}]: {message}")

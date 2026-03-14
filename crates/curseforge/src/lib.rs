@@ -1,5 +1,5 @@
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use std::io::Read as _;
 use std::sync::{Mutex, OnceLock};
 use tracing::{debug, warn};
@@ -74,6 +74,16 @@ pub struct Project {
     pub primary_category_id: Option<u32>,
     pub website_url: Option<String>,
     pub icon_url: Option<String>,
+    pub latest_files_indexes: Vec<LatestFileIndex>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LatestFileIndex {
+    pub file_id: u64,
+    pub filename: String,
+    pub game_version: String,
+    pub mod_loader: Option<u32>,
+    pub game_version_type_id: Option<u32>,
 }
 
 /// Downloadable file metadata for a CurseForge project.
@@ -278,6 +288,31 @@ impl Client {
         Ok(response.data.into_project())
     }
 
+    /// Fetches multiple projects by ID in one request.
+    pub fn get_mods(&self, project_ids: &[u64]) -> Result<Vec<Project>, CurseForgeError> {
+        let project_ids = prepare_u64_ids(project_ids);
+        if project_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        debug!(
+            target: "vertexlauncher/curseforge",
+            projects = project_ids.len(),
+            "fetching CurseForge projects in batch"
+        );
+        let response: DataResponse<Vec<ModRecord>> = self.post_json(
+            "/v1/mods",
+            &ModIdsRequest {
+                mod_ids: project_ids.as_slice(),
+            },
+        )?;
+        Ok(response
+            .data
+            .into_iter()
+            .map(ModRecord::into_project)
+            .collect())
+    }
+
     /// Lists files for a project, optionally filtered by compatibility.
     pub fn list_mod_files(
         &self,
@@ -317,6 +352,31 @@ impl Client {
             .collect())
     }
 
+    /// Fetches multiple files by ID in one request.
+    pub fn get_files(&self, file_ids: &[u64]) -> Result<Vec<File>, CurseForgeError> {
+        let file_ids = prepare_u64_ids(file_ids);
+        if file_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        debug!(
+            target: "vertexlauncher/curseforge",
+            files = file_ids.len(),
+            "fetching CurseForge files in batch"
+        );
+        let response: DataResponse<Vec<FileRecord>> = self.post_json(
+            "/v1/mods/files",
+            &FileIdsRequest {
+                file_ids: file_ids.as_slice(),
+            },
+        )?;
+        Ok(response
+            .data
+            .into_iter()
+            .map(FileRecord::into_file)
+            .collect())
+    }
+
     /// Executes a GET request and deserializes the JSON body.
     ///
     /// `path` is appended to the configured `base_url`.
@@ -342,7 +402,42 @@ impl Client {
             request = request.query(key, value);
         }
 
-        let mut response = match request.config().http_status_as_error(false).build().call() {
+        self.read_json_response(
+            path,
+            request.config().http_status_as_error(false).build().call(),
+        )
+    }
+
+    fn post_json<T: DeserializeOwned, B: Serialize>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, CurseForgeError> {
+        debug!(
+            target: "vertexlauncher/curseforge",
+            path,
+            "sending CurseForge POST request"
+        );
+
+        self.read_json_response(
+            path,
+            self.agent
+                .post(&format!("{}{}", self.base_url, path))
+                .header("User-Agent", &self.user_agent)
+                .header("x-api-key", &self.api_key)
+                .config()
+                .http_status_as_error(false)
+                .build()
+                .send_json(body),
+        )
+    }
+
+    fn read_json_response<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        response_result: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+    ) -> Result<T, CurseForgeError> {
+        let mut response = match response_result {
             Ok(ok) => ok,
             Err(err) => {
                 warn!(
@@ -410,6 +505,18 @@ struct DataResponse<T> {
     data: T,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModIdsRequest<'a> {
+    mod_ids: &'a [u64],
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileIdsRequest<'a> {
+    file_ids: &'a [u64],
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CategoryRecord {
@@ -431,6 +538,8 @@ struct ModRecord {
     logo: Option<ModLogo>,
     download_count: Option<f64>,
     date_modified: Option<String>,
+    #[serde(default)]
+    latest_files_indexes: Vec<LatestFileIndexRecord>,
 }
 
 impl ModRecord {
@@ -459,6 +568,35 @@ impl ModRecord {
             primary_category_id: self.primary_category_id,
             website_url: self.links.and_then(|links| links.website_url),
             icon_url: self.logo.and_then(|logo| logo.thumbnail_url.or(logo.url)),
+            latest_files_indexes: self
+                .latest_files_indexes
+                .into_iter()
+                .map(LatestFileIndexRecord::into_latest_file_index)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LatestFileIndexRecord {
+    file_id: u64,
+    #[serde(default)]
+    filename: String,
+    #[serde(default)]
+    game_version: String,
+    mod_loader: Option<u32>,
+    game_version_type_id: Option<u32>,
+}
+
+impl LatestFileIndexRecord {
+    fn into_latest_file_index(self) -> LatestFileIndex {
+        LatestFileIndex {
+            file_id: self.file_id,
+            filename: self.filename,
+            game_version: self.game_version,
+            mod_loader: self.mod_loader,
+            game_version_type_id: self.game_version_type_id,
         }
     }
 }
@@ -525,4 +663,15 @@ struct FileDependencyRecord {
 
 fn non_empty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn prepare_u64_ids(values: &[u64]) -> Vec<u64> {
+    let mut prepared = Vec::new();
+    for value in values {
+        if *value == 0 || prepared.contains(value) {
+            continue;
+        }
+        prepared.push(*value);
+    }
+    prepared
 }

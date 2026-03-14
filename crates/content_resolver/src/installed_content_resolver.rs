@@ -14,8 +14,6 @@ use crate::{
 
 const CONTENT_HASH_CACHE_DIR_NAME: &str = "cache";
 const CONTENT_HASH_CACHE_FILE_NAME: &str = "content_hash_cache.json";
-const CURSEFORGE_VERSION_LOOKUP_PAGE_SIZE: u32 = 50;
-const CURSEFORGE_VERSION_LOOKUP_MAX_PAGES: u32 = 5;
 const LOOKUP_CACHE_KEY_PREFIX: &str = "lookup::";
 const HEURISTIC_WARNING_MESSAGE: &str =
     "Resolved from filename search. This match is heuristic and may be wrong.";
@@ -151,20 +149,20 @@ impl InstalledContentResolver {
     ) -> ResolveInstalledContentResult {
         let mut hash_cache_updates = Vec::new();
 
-        let exact_hash_resolution = if request.kind == InstalledContentKind::Mods
-            && is_jar_file(request.file_path.as_path())
-        {
-            let (resolution, updates) = resolve_modrinth_hash_metadata(
-                request.file_path.as_path(),
-                request.game_version.as_str(),
-                request.loader.as_str(),
-                hash_cache,
-            );
-            hash_cache_updates = updates;
-            resolution
-        } else {
-            None
-        };
+        let exact_hash_resolution =
+            if supports_modrinth_hash_resolution(request.kind, request.file_path.as_path()) {
+                let (resolution, updates) = resolve_modrinth_hash_metadata(
+                    request.file_path.as_path(),
+                    request.kind,
+                    request.game_version.as_str(),
+                    request.loader.as_str(),
+                    hash_cache,
+                );
+                hash_cache_updates = updates;
+                resolution
+            } else {
+                None
+            };
 
         if let Some(resolution) = exact_hash_resolution.as_ref() {
             hash_cache_updates.extend(lookup_cache_updates_for_request(request, resolution));
@@ -216,6 +214,7 @@ impl InstalledContentResolver {
 
 fn resolve_modrinth_hash_metadata(
     file_path: &Path,
+    kind: InstalledContentKind,
     game_version: &str,
     loader: &str,
     hash_cache: &InstalledContentHashCache,
@@ -228,7 +227,11 @@ fn resolve_modrinth_hash_metadata(
     };
 
     let modrinth = ModrinthClient::default();
-    let loaders = modrinth_loader_slugs(loader);
+    let loaders = if kind == InstalledContentKind::Mods {
+        modrinth_loader_slugs(loader)
+    } else {
+        Vec::new()
+    };
     let game_versions = normalized_game_versions(game_version);
     let mut saw_transient_error = false;
 
@@ -402,9 +405,9 @@ fn managed_content_metadata(
             let project_id = identity.curseforge_project_id?;
             let version_id = identity.selected_version_id.trim().parse::<u64>().ok()?;
             let curseforge = CurseForgeClient::from_env()?;
-            let file = find_curseforge_project_file(&curseforge, project_id, version_id)?;
-            if file.file_name != disk_file_name
-                || file_path.file_name()?.to_str()? != disk_file_name
+            let file = find_curseforge_project_file(&curseforge, version_id)?;
+            if !file_name_matches(file.file_name.as_str(), disk_file_name)
+                || !file_name_matches(file_path.file_name()?.to_str()?, disk_file_name)
             {
                 return None;
             }
@@ -413,12 +416,12 @@ fn managed_content_metadata(
             Some(ResolvedInstalledContent {
                 entry: UnifiedContentEntry {
                     id: format!("curseforge:{}", project.id),
-                    name: project.name,
+                    name: project.name.clone(),
                     summary: project.summary.trim().to_owned(),
                     content_type: kind.content_type_key().to_owned(),
                     source: ContentSource::CurseForge,
-                    project_url: project.website_url,
-                    icon_url: project.icon_url,
+                    project_url: project.website_url.clone(),
+                    icon_url: project.icon_url.clone(),
                 },
                 installed_version_id: Some(file.id.to_string()),
                 installed_version_label: non_empty_owned(file.display_name.as_str()),
@@ -426,7 +429,7 @@ fn managed_content_metadata(
                 warning_message: None,
                 update: resolve_managed_curseforge_update(
                     &curseforge,
-                    project_id,
+                    &project,
                     version_id,
                     kind,
                     game_version,
@@ -617,42 +620,23 @@ fn managed_identity_matches_file_name(
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or_default();
-    !expected.is_empty() && expected == disk_file_name
+    file_name_matches(expected, disk_file_name)
 }
 
 fn version_contains_file_name(
     files: &[modrinth::ProjectVersionFile],
     disk_file_name: &str,
 ) -> bool {
-    files.iter().any(|file| file.filename == disk_file_name)
+    files
+        .iter()
+        .any(|file| file_name_matches(file.filename.as_str(), disk_file_name))
 }
 
 fn find_curseforge_project_file(
     client: &CurseForgeClient,
-    project_id: u64,
     version_id: u64,
 ) -> Option<curseforge::File> {
-    let mut index = 0u32;
-    for _ in 0..CURSEFORGE_VERSION_LOOKUP_MAX_PAGES {
-        let batch = client
-            .list_mod_files(
-                project_id,
-                None,
-                None,
-                index,
-                CURSEFORGE_VERSION_LOOKUP_PAGE_SIZE,
-            )
-            .ok()?;
-        let batch_len = batch.len() as u32;
-        if let Some(file) = batch.into_iter().find(|file| file.id == version_id) {
-            return Some(file);
-        }
-        if batch_len < CURSEFORGE_VERSION_LOOKUP_PAGE_SIZE {
-            break;
-        }
-        index = index.saturating_add(CURSEFORGE_VERSION_LOOKUP_PAGE_SIZE);
-    }
-    None
+    client.get_files(&[version_id]).ok()?.into_iter().next()
 }
 
 fn resolve_managed_modrinth_update(
@@ -688,48 +672,38 @@ fn resolve_managed_modrinth_update(
 
 fn resolve_managed_curseforge_update(
     curseforge: &CurseForgeClient,
-    project_id: u64,
+    project: &curseforge::Project,
     installed_version_id: u64,
     kind: InstalledContentKind,
     game_version: &str,
     loader: &str,
 ) -> Option<InstalledContentUpdate> {
-    let game_version = normalize_optional(game_version);
-    let mod_loader_type = if kind == InstalledContentKind::Mods {
-        curseforge_mod_loader_type(loader)
-    } else {
-        None
-    };
-    let mut index = 0u32;
-    let mut latest: Option<curseforge::File> = None;
-
-    for _ in 0..CURSEFORGE_VERSION_LOOKUP_MAX_PAGES {
-        let batch = curseforge
-            .list_mod_files(
-                project_id,
-                game_version.as_deref(),
-                mod_loader_type,
-                index,
-                CURSEFORGE_VERSION_LOOKUP_PAGE_SIZE,
-            )
-            .ok()?;
-        let batch_len = batch.len() as u32;
-        for file in batch {
-            if file.download_url.is_none() {
-                continue;
+    let latest_file_id = project
+        .latest_files_indexes
+        .iter()
+        .filter(|index| {
+            normalize_optional(game_version)
+                .as_deref()
+                .is_none_or(|value| index.game_version.trim() == value)
+        })
+        .filter(|index| {
+            if kind == InstalledContentKind::Mods {
+                curseforge_mod_loader_type(loader)
+                    .is_none_or(|value| index.mod_loader == Some(value))
+            } else {
+                true
             }
-            match latest.as_ref() {
-                Some(current) if current.file_date >= file.file_date => {}
-                _ => latest = Some(file),
-            }
-        }
-        if batch_len < CURSEFORGE_VERSION_LOOKUP_PAGE_SIZE {
-            break;
-        }
-        index = index.saturating_add(CURSEFORGE_VERSION_LOOKUP_PAGE_SIZE);
+        })
+        .map(|index| index.file_id)
+        .max()?;
+    let latest = curseforge
+        .get_files(&[latest_file_id])
+        .ok()?
+        .into_iter()
+        .next()?;
+    if latest.download_url.is_none() {
+        return None;
     }
-
-    let latest = latest?;
     if latest.id == installed_version_id {
         return None;
     }
@@ -741,10 +715,21 @@ fn resolve_managed_curseforge_update(
     })
 }
 
-fn is_jar_file(path: &Path) -> bool {
-    path.extension()
-        .and_then(|value| value.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("jar"))
+fn supports_modrinth_hash_resolution(kind: InstalledContentKind, path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+
+    let Some(extension) = path.extension().and_then(|value| value.to_str()) else {
+        return false;
+    };
+
+    match kind {
+        InstalledContentKind::Mods => extension.eq_ignore_ascii_case("jar"),
+        InstalledContentKind::ResourcePacks
+        | InstalledContentKind::ShaderPacks
+        | InstalledContentKind::DataPacks => extension.eq_ignore_ascii_case("zip"),
+    }
 }
 
 fn modrinth_loader_slugs(loader: &str) -> Vec<String> {
@@ -806,6 +791,12 @@ fn non_empty_owned(value: &str) -> Option<String> {
     }
 }
 
+fn file_name_matches(left: &str, right: &str) -> bool {
+    let left = left.trim();
+    let right = right.trim();
+    !left.is_empty() && left.eq_ignore_ascii_case(right)
+}
+
 fn content_hash_cache_path(instance_root: &Path) -> PathBuf {
     instance_root
         .join(CONTENT_HASH_CACHE_DIR_NAME)
@@ -847,25 +838,26 @@ fn derive_installed_lookup_query(path: &Path, fallback_file_name: &str) -> Strin
         return fallback_file_name.to_owned();
     }
 
-    let pieces: Vec<&str> = raw
+    let pieces: Vec<String> = raw
         .split(['-', '_'])
         .map(str::trim)
         .filter(|piece| !piece.is_empty())
+        .map(split_camel_case_words)
         .collect();
     if pieces.is_empty() {
-        return raw.to_owned();
+        return split_camel_case_words(raw);
     }
 
     let mut kept = Vec::new();
     for piece in pieces {
-        if looks_like_version_segment(piece) {
+        if looks_like_version_segment(piece.as_str()) {
             break;
         }
         kept.push(piece);
     }
 
     if kept.is_empty() {
-        raw.to_owned()
+        split_camel_case_words(raw)
     } else {
         kept.join(" ")
     }
@@ -876,8 +868,8 @@ fn derive_raw_lookup_query(path: &Path, fallback_file_name: &str) -> String {
         .and_then(|value| value.to_str())
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(fallback_file_name)
-        .to_owned()
+        .map(split_camel_case_words)
+        .unwrap_or_else(|| split_camel_case_words(fallback_file_name))
 }
 
 fn looks_like_version_segment(value: &str) -> bool {
@@ -1052,11 +1044,48 @@ fn is_ignorable_lookup_suffix_token(token: &str) -> bool {
             | "loader"
             | "mod"
             | "mods"
+            | "shader"
+            | "shaders"
+            | "shaderpack"
+            | "shaderpacks"
+            | "resourcepack"
+            | "resourcepacks"
+            | "texturepack"
+            | "texturepacks"
+            | "datapack"
+            | "datapacks"
             | "minecraft"
             | "mc"
             | "client"
             | "server"
     )
+}
+
+fn split_camel_case_words(value: &str) -> String {
+    let mut result = String::with_capacity(value.len() + 8);
+    let mut chars = value.chars().peekable();
+    let mut previous: Option<char> = None;
+
+    while let Some(ch) = chars.next() {
+        let next = chars.peek().copied();
+        if let Some(prev) = previous
+            && should_insert_camel_case_boundary(prev, ch, next)
+            && !result.ends_with(' ')
+        {
+            result.push(' ');
+        }
+        result.push(ch);
+        previous = Some(ch);
+    }
+
+    result
+}
+
+fn should_insert_camel_case_boundary(previous: char, current: char, next: Option<char>) -> bool {
+    (previous.is_ascii_lowercase() && current.is_ascii_uppercase())
+        || (previous.is_ascii_uppercase()
+            && current.is_ascii_uppercase()
+            && next.is_some_and(|next| next.is_ascii_lowercase()))
 }
 
 fn query_has_only_ignorable_suffix_tokens(
@@ -1194,12 +1223,46 @@ mod tests {
     }
 
     #[test]
+    fn shader_lookup_query_splits_camel_case_file_names() {
+        let path = Path::new("shaderpacks/ComplementaryUnbound_r5.4.1.zip");
+
+        assert_eq!(
+            derive_installed_lookup_query(path, "ComplementaryUnbound_r5.4.1.zip"),
+            "Complementary Unbound"
+        );
+        assert_eq!(
+            derive_raw_lookup_query(path, "ComplementaryUnbound_r5.4.1.zip"),
+            "Complementary Unbound_r5.4.1"
+        );
+    }
+
+    #[test]
     fn levenshtein_distance_prefers_nearest_match() {
         assert!(levenshtein_distance("sodium", "sodium") < levenshtein_distance("sodium", "sod"));
         assert!(
             levenshtein_distance("iris shaders", "iris")
                 < levenshtein_distance("iris shaders", "indium")
         );
+    }
+
+    #[test]
+    fn autodetect_ignores_shader_suffix_tokens() {
+        let selected = choose_preferred_content_entry(
+            vec![UnifiedContentEntry {
+                id: "modrinth:complementary-unbound".to_owned(),
+                name: "Complementary Unbound".to_owned(),
+                summary: String::new(),
+                content_type: "shader".to_owned(),
+                source: ContentSource::Modrinth,
+                project_url: None,
+                icon_url: None,
+            }],
+            "shaderpacks::complementary unbound shaders",
+            InstalledContentKind::ShaderPacks,
+        )
+        .expect("expected a matching shader entry");
+
+        assert_eq!(selected.name, "Complementary Unbound");
     }
 
     #[test]

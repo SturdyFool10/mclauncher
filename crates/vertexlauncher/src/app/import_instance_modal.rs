@@ -2037,22 +2037,12 @@ fn find_curseforge_file(
     project_id: u64,
     file_id: u64,
 ) -> Result<curseforge::File, String> {
-    let mut index = 0u32;
-    loop {
-        let files = client
-            .list_mod_files(project_id, None, None, index, 50)
-            .map_err(|err| format!("failed to list CurseForge files for {project_id}: {err}"))?;
-        if files.is_empty() {
-            break;
-        }
-        if let Some(found) = files.into_iter().find(|file| file.id == file_id) {
-            return Ok(found);
-        }
-        index += 50;
-    }
-    Err(format!(
-        "CurseForge file {file_id} was not found for project {project_id}"
-    ))
+    client
+        .get_files(&[file_id])
+        .map_err(|err| format!("failed to fetch CurseForge file {file_id}: {err}"))?
+        .into_iter()
+        .next()
+        .ok_or_else(|| format!("CurseForge file {file_id} was not found for project {project_id}"))
 }
 
 fn populate_mrpack_instance(

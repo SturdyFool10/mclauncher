@@ -263,6 +263,13 @@ pub struct DownloadPolicy {
     pub max_download_bps: Option<u64>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DownloadBatchTask {
+    pub url: String,
+    pub destination: PathBuf,
+    pub expected_size: Option<u64>,
+}
+
 impl Default for DownloadPolicy {
     fn default() -> Self {
         Self {
@@ -295,6 +302,30 @@ pub struct InstallProgress {
 
 pub type InstallProgressCallback = Arc<dyn Fn(InstallProgress) + Send + Sync + 'static>;
 type InstallProgressSink = dyn Fn(InstallProgress) + Send + Sync + 'static;
+
+pub fn download_batch(
+    tasks: Vec<DownloadBatchTask>,
+    policy: &DownloadPolicy,
+) -> Result<u32, InstallationError> {
+    download_batch_with_progress(tasks, policy, InstallStage::DownloadingCore, None)
+}
+
+pub fn download_batch_with_progress(
+    tasks: Vec<DownloadBatchTask>,
+    policy: &DownloadPolicy,
+    stage: InstallStage,
+    progress: Option<&InstallProgressCallback>,
+) -> Result<u32, InstallationError> {
+    let tasks = tasks
+        .into_iter()
+        .map(|task| FileDownloadTask {
+            url: task.url,
+            destination: task.destination,
+            expected_size: task.expected_size,
+        })
+        .collect();
+    download_files_concurrent(stage, tasks, policy, 0, progress.map(Arc::as_ref))
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum InstallationError {

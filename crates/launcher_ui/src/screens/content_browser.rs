@@ -1,7 +1,10 @@
 use config::Config;
 use curseforge::{Client as CurseForgeClient, MINECRAFT_GAME_ID};
 use egui::Ui;
-use installation::{MinecraftVersionEntry, fetch_version_catalog};
+use installation::{
+    DownloadBatchTask, DownloadPolicy, InstallProgressCallback, InstallStage,
+    MinecraftVersionEntry, download_batch_with_progress, fetch_version_catalog,
+};
 use instances::{InstanceStore, instance_root_path};
 use managed_content::{
     ContentInstallManifest, InstalledContentProject, ManagedContentSource, load_content_manifest,
@@ -41,6 +44,7 @@ const TILE_ACTION_BUTTON_WIDTH: f32 = 28.0;
 const TILE_ACTION_BUTTON_HEIGHT: f32 = 28.0;
 const TILE_ACTION_BUTTON_GAP_XS: f32 = 4.0;
 const TILE_DOWNLOAD_PROGRESS_WIDTH: f32 = 96.0;
+const CONTENT_UPDATE_LOG_TARGET: &str = "vertexlauncher/content_update";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum ContentBrowserPage {
@@ -314,6 +318,19 @@ struct ContentDownloadOutcome {
     project_name: String,
     added_files: Vec<String>,
     removed_files: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct BulkContentUpdate {
+    pub entry: UnifiedContentEntry,
+    pub installed_file_path: PathBuf,
+    pub version_id: String,
+}
+
+#[derive(Debug, Default)]
+struct DeferredContentCleanup {
+    stale_paths: Vec<PathBuf>,
+    staged_paths: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2144,7 +2161,11 @@ fn parse_content_type(value: &str) -> Option<BrowserContentType> {
     let normalized = normalize_type_key(value);
     if normalized.contains("shader") {
         Some(BrowserContentType::Shader)
-    } else if normalized.contains("resource pack") || normalized.contains("texture pack") {
+    } else if normalized.contains("resource pack")
+        || normalized.contains("resourcepack")
+        || normalized.contains("texture pack")
+        || normalized.contains("texturepack")
+    {
         Some(BrowserContentType::ResourcePack)
     } else if normalized.contains("data pack") || normalized.contains("datapack") {
         Some(BrowserContentType::DataPack)
@@ -2452,6 +2473,14 @@ fn fetch_versions_for_entry(
         let project_versions = modrinth
             .list_project_versions(project_id, &[], &[])
             .map_err(|err| format!("Modrinth versions failed for {project_id}: {err}"))?;
+        let dependency_version_projects = modrinth_dependency_project_ids(
+            &modrinth,
+            project_versions
+                .iter()
+                .flat_map(|version| version.dependencies.iter().cloned())
+                .collect::<Vec<_>>()
+                .as_slice(),
+        );
         for version in project_versions {
             let Some(file) = version
                 .files
@@ -2461,20 +2490,10 @@ fn fetch_versions_for_entry(
             else {
                 continue;
             };
-            let mut dependencies = Vec::new();
-            for dep in version.dependencies {
-                if !dep.dependency_type.eq_ignore_ascii_case("required") {
-                    continue;
-                }
-                if let Some(dep_project) = dep.project_id {
-                    dependencies.push(DependencyRef::ModrinthProject(dep_project));
-                } else if let Some(dep_version) = dep.version_id
-                    && let Ok(version_detail) = modrinth.get_version(dep_version.as_str())
-                    && !version_detail.project_id.trim().is_empty()
-                {
-                    dependencies.push(DependencyRef::ModrinthProject(version_detail.project_id));
-                }
-            }
+            let dependencies = modrinth_dependency_refs(
+                version.dependencies.as_slice(),
+                &dependency_version_projects,
+            );
             versions.push(BrowserVersionEntry {
                 source: ManagedContentSource::Modrinth,
                 version_id: version.id,
@@ -2546,20 +2565,12 @@ fn fetch_exact_version_for_entry(
                 .ok_or_else(|| {
                     format!("No downloadable file found for Modrinth version {version_id}.")
                 })?;
-            let mut dependencies = Vec::new();
-            for dep in version.dependencies {
-                if !dep.dependency_type.eq_ignore_ascii_case("required") {
-                    continue;
-                }
-                if let Some(dep_project) = dep.project_id {
-                    dependencies.push(DependencyRef::ModrinthProject(dep_project));
-                } else if let Some(dep_version) = dep.version_id
-                    && let Ok(version_detail) = modrinth.get_version(dep_version.as_str())
-                    && !version_detail.project_id.trim().is_empty()
-                {
-                    dependencies.push(DependencyRef::ModrinthProject(version_detail.project_id));
-                }
-            }
+            let dependency_version_projects =
+                modrinth_dependency_project_ids(&modrinth, version.dependencies.as_slice());
+            let dependencies = modrinth_dependency_refs(
+                version.dependencies.as_slice(),
+                &dependency_version_projects,
+            );
             Ok(BrowserVersionEntry {
                 source,
                 version_id: version.id,
@@ -2575,16 +2586,17 @@ fn fetch_exact_version_for_entry(
         ManagedContentSource::CurseForge => {
             let curseforge = CurseForgeClient::from_env()
                 .ok_or_else(|| "CurseForge API key missing.".to_owned())?;
-            let project_id = entry
-                .curseforge_project_id
-                .ok_or_else(|| format!("CurseForge project id missing for {}.", entry.name))?;
             let version_id_u64 = version_id
                 .trim()
                 .parse::<u64>()
                 .map_err(|err| format!("Invalid CurseForge version id {version_id}: {err}"))?;
-            let file = fetch_curseforge_versions(&curseforge, project_id)?
+            let file = curseforge
+                .get_files(&[version_id_u64])
+                .map_err(|err| {
+                    format!("CurseForge version lookup failed for {version_id_u64}: {err}")
+                })?
                 .into_iter()
-                .find(|file| file.id == version_id_u64)
+                .next()
                 .ok_or_else(|| {
                     format!(
                         "Could not find CurseForge version {} for {}.",
@@ -2625,13 +2637,181 @@ pub(crate) fn update_installed_content_to_version(
     game_version: &str,
     loader_label: &str,
 ) -> Result<String, String> {
+    update_installed_content_to_version_with_prefetched_downloads(
+        instance_root,
+        entry,
+        installed_file_path,
+        version_id,
+        game_version,
+        loader_label,
+        &HashMap::new(),
+    )
+}
+
+pub(crate) fn bulk_update_installed_content(
+    instance_root: &Path,
+    updates: &[BulkContentUpdate],
+    game_version: &str,
+    loader_label: &str,
+    download_policy: &DownloadPolicy,
+    progress: Option<&InstallProgressCallback>,
+) -> Result<usize, String> {
+    if updates.is_empty() {
+        return Ok(0);
+    }
+    tracing::info!(
+        target: CONTENT_UPDATE_LOG_TARGET,
+        instance_root = %instance_root.display(),
+        root_updates = updates.len(),
+        game_version = %game_version,
+        loader = %loader_label,
+        "planning bulk content update"
+    );
+
+    let modrinth = ModrinthClient::default();
+    let curseforge = CurseForgeClient::from_env();
+    let loader = browser_loader_from_modloader(loader_label);
+    let manifest = load_content_manifest(instance_root);
+    let mut planned_versions = HashMap::new();
+    let mut queued_paths = HashSet::new();
+    let mut download_tasks = Vec::new();
+    let mut root_updates = Vec::new();
+
+    for update in updates {
+        let browser_entry = browser_entry_from_unified_content(&update.entry)?;
+        let source = ManagedContentSource::from(update.entry.source);
+        let version =
+            fetch_exact_version_for_entry(&browser_entry, source, update.version_id.as_str())?;
+        let resolved = resolved_download_from_version(version.clone());
+        let should_apply = collect_content_download_tasks_for_request(
+            instance_root,
+            &manifest,
+            &browser_entry,
+            &resolved,
+            game_version,
+            loader,
+            &modrinth,
+            curseforge.as_ref(),
+            &mut planned_versions,
+            &mut queued_paths,
+            &mut download_tasks,
+        )?;
+        if should_apply {
+            tracing::debug!(
+                target: CONTENT_UPDATE_LOG_TARGET,
+                instance_root = %instance_root.display(),
+                project = %update.entry.name,
+                version_id = %version.version_id,
+                installed_path = %update.installed_file_path.display(),
+                "queued root content update"
+            );
+            root_updates.push((
+                update.entry.clone(),
+                update.installed_file_path.clone(),
+                version.version_id.clone(),
+            ));
+        }
+    }
+
+    let prefetched_paths: HashMap<PathBuf, PathBuf> = download_tasks
+        .iter()
+        .filter_map(|task| {
+            task.destination.file_name().map(|_| {
+                (
+                    prefetched_target_path(task.destination.as_path()),
+                    task.destination.clone(),
+                )
+            })
+        })
+        .collect();
+    if !download_tasks.is_empty() {
+        tracing::info!(
+            target: CONTENT_UPDATE_LOG_TARGET,
+            instance_root = %instance_root.display(),
+            download_tasks = download_tasks.len(),
+            root_updates = root_updates.len(),
+            "downloading prefetched files for bulk content update"
+        );
+        download_batch_with_progress(
+            download_tasks,
+            download_policy,
+            InstallStage::DownloadingCore,
+            progress,
+        )
+        .map_err(|err| format!("failed to download queued content updates: {err}"))?;
+    }
+
+    let mut applied = 0usize;
+    for (entry, installed_file_path, version_id) in root_updates {
+        tracing::info!(
+            target: CONTENT_UPDATE_LOG_TARGET,
+            instance_root = %instance_root.display(),
+            project = %entry.name,
+            version_id = %version_id,
+            installed_path = %installed_file_path.display(),
+            "applying prefetched content update"
+        );
+        update_installed_content_to_version_with_prefetched_downloads(
+            instance_root,
+            &entry,
+            installed_file_path.as_path(),
+            version_id.as_str(),
+            game_version,
+            loader_label,
+            &prefetched_paths,
+        )?;
+        applied += 1;
+    }
+    tracing::info!(
+        target: CONTENT_UPDATE_LOG_TARGET,
+        instance_root = %instance_root.display(),
+        applied,
+        "finished bulk content update apply pass"
+    );
+    Ok(applied)
+}
+
+fn update_installed_content_to_version_with_prefetched_downloads(
+    instance_root: &Path,
+    entry: &UnifiedContentEntry,
+    installed_file_path: &Path,
+    version_id: &str,
+    game_version: &str,
+    loader_label: &str,
+    prefetched_paths: &HashMap<PathBuf, PathBuf>,
+) -> Result<String, String> {
+    tracing::info!(
+        target: CONTENT_UPDATE_LOG_TARGET,
+        instance_root = %instance_root.display(),
+        project = %entry.name,
+        version_id = %version_id,
+        installed_path = %installed_file_path.display(),
+        prefetched = !prefetched_paths.is_empty(),
+        "starting content version update"
+    );
     let browser_entry = browser_entry_from_unified_content(entry)?;
     let source = ManagedContentSource::from(entry.source);
     let version = fetch_exact_version_for_entry(&browser_entry, source, version_id)?;
     let target_path = content_target_path(instance_root, &browser_entry, &version);
-    let staged_existing_path =
-        stage_existing_file_for_update(installed_file_path, target_path.as_path())?;
-    let mut outcome = match apply_content_install_request(
+    let manifest = load_content_manifest(instance_root);
+    let (effective_installed_file_path, stale_requested_path) =
+        resolve_installed_file_paths_for_update(
+            instance_root,
+            &manifest,
+            &browser_entry,
+            installed_file_path,
+        );
+    let additional_cleanup_paths = stale_requested_path
+        .as_ref()
+        .filter(|path| !paths_match_for_update(path.as_path(), target_path.as_path()))
+        .cloned()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let staged_existing_path = stage_existing_file_for_update(
+        effective_installed_file_path.as_path(),
+        target_path.as_path(),
+    )?;
+    let mut outcome = match apply_content_install_request_with_prefetched_downloads(
         instance_root,
         ContentInstallRequest::Exact {
             entry: browser_entry,
@@ -2639,31 +2819,166 @@ pub(crate) fn update_installed_content_to_version(
             game_version: game_version.trim().to_owned(),
             loader: browser_loader_from_modloader(loader_label),
         },
+        prefetched_paths,
+        additional_cleanup_paths.as_slice(),
     ) {
         Ok(outcome) => outcome,
         Err(err) => {
+            tracing::error!(
+                target: CONTENT_UPDATE_LOG_TARGET,
+                instance_root = %instance_root.display(),
+                project = %entry.name,
+                version_id = %version_id,
+                installed_path = %effective_installed_file_path.display(),
+                target_path = %target_path.display(),
+                "content version update failed before finalize: {err}"
+            );
             if let Some(staged_path) = staged_existing_path {
-                restore_staged_update_file(staged_path.as_path(), installed_file_path).map_err(
-                    |restore_err| {
-                        format!("{err} (also failed to restore original file: {restore_err})")
-                    },
-                )?;
+                restore_staged_update_file(
+                    staged_path.as_path(),
+                    effective_installed_file_path.as_path(),
+                )
+                .map_err(|restore_err| {
+                    format!("{err} (also failed to restore original file: {restore_err})")
+                })?;
             }
             return Err(err);
         }
     };
-    finalize_updated_file_replacement(
-        installed_file_path,
-        target_path.as_path(),
-        staged_existing_path.as_deref(),
-        &mut outcome.removed_files,
-    )?;
+    if prefetched_paths.is_empty() {
+        finalize_updated_file_replacement(
+            effective_installed_file_path.as_path(),
+            target_path.as_path(),
+            staged_existing_path.as_deref(),
+            &mut outcome.removed_files,
+            None,
+        )?;
+    } else if let Some(staged_path) = staged_existing_path.as_ref()
+        && staged_path.exists()
+    {
+        remove_content_path(staged_path.as_path())?;
+        outcome
+            .removed_files
+            .push(staged_path.display().to_string());
+    }
+    tracing::info!(
+        target: CONTENT_UPDATE_LOG_TARGET,
+        instance_root = %instance_root.display(),
+        project = %entry.name,
+        version_id = %version_id,
+        target_path = %target_path.display(),
+        added_files = outcome.added_files.len(),
+        removed_files = outcome.removed_files.len(),
+        "completed content version update"
+    );
     Ok(format!(
         "Updated {}: {} added, {} removed.",
         outcome.project_name,
         outcome.added_files.len(),
         outcome.removed_files.len()
     ))
+}
+
+fn resolve_installed_file_paths_for_update(
+    instance_root: &Path,
+    manifest: &ContentInstallManifest,
+    entry: &BrowserProjectEntry,
+    requested_installed_file_path: &Path,
+) -> (PathBuf, Option<PathBuf>) {
+    let managed_installed_file_path = installed_project_for_entry(manifest, entry)
+        .map(|(_, project)| instance_root.join(project.file_path.as_str()))
+        .filter(|path| path.exists());
+    let effective_installed_file_path = managed_installed_file_path
+        .clone()
+        .unwrap_or_else(|| requested_installed_file_path.to_path_buf());
+    let stale_requested_path = if managed_installed_file_path.is_some()
+        && requested_installed_file_path.exists()
+        && !paths_match_for_update(
+            effective_installed_file_path.as_path(),
+            requested_installed_file_path,
+        ) {
+        Some(requested_installed_file_path.to_path_buf())
+    } else {
+        None
+    };
+
+    (effective_installed_file_path, stale_requested_path)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_content_download_tasks_for_request(
+    instance_root: &Path,
+    manifest: &ContentInstallManifest,
+    entry: &BrowserProjectEntry,
+    resolved: &ResolvedDownload,
+    game_version: &str,
+    loader: BrowserLoader,
+    modrinth: &ModrinthClient,
+    curseforge: Option<&CurseForgeClient>,
+    planned_versions: &mut HashMap<String, String>,
+    queued_paths: &mut HashSet<PathBuf>,
+    download_tasks: &mut Vec<DownloadBatchTask>,
+) -> Result<bool, String> {
+    let project_key = installed_project_for_entry(manifest, entry)
+        .map(|(key, _)| key.to_owned())
+        .unwrap_or_else(|| entry.dedupe_key.clone());
+    let target_path = content_target_path_for_resolved_download(instance_root, entry, resolved);
+    let existing = installed_project_for_entry(manifest, entry).map(|(_, project)| project);
+
+    if let Some(planned_version_id) = planned_versions.get(project_key.as_str()) {
+        if planned_version_id == &resolved.version_id {
+            return Ok(false);
+        }
+        return Err(format!(
+            "Bulk update requires conflicting versions of {}.",
+            entry.name
+        ));
+    }
+
+    if existing.is_some_and(|project| {
+        project.selected_source == Some(resolved.source)
+            && project.selected_version_id.as_deref() == Some(resolved.version_id.as_str())
+            && target_path.exists()
+    }) {
+        return Ok(false);
+    }
+
+    planned_versions.insert(project_key, resolved.version_id.clone());
+    if (existing.is_some() || !target_path.exists()) && queued_paths.insert(target_path.clone()) {
+        download_tasks.push(DownloadBatchTask {
+            url: resolved.file_url.clone(),
+            destination: prefetched_target_path(target_path.as_path()),
+            expected_size: None,
+        });
+    }
+
+    for dep_entry in
+        dependency_to_browser_entries(resolved.dependencies.as_slice(), modrinth, curseforge)?
+    {
+        let dep_resolved =
+            resolve_best_download(&dep_entry, game_version, loader, modrinth, curseforge)?
+                .ok_or_else(|| {
+                    format!(
+                        "No compatible downloadable file found for dependency {}.",
+                        dep_entry.name
+                    )
+                })?;
+        let _ = collect_content_download_tasks_for_request(
+            instance_root,
+            manifest,
+            &dep_entry,
+            &dep_resolved,
+            game_version,
+            loader,
+            modrinth,
+            curseforge,
+            planned_versions,
+            queued_paths,
+            download_tasks,
+        )?;
+    }
+
+    Ok(true)
 }
 
 fn fetch_curseforge_versions(
@@ -3409,6 +3724,20 @@ fn apply_content_install_request(
     instance_root: &Path,
     request: ContentInstallRequest,
 ) -> Result<ContentDownloadOutcome, String> {
+    apply_content_install_request_with_prefetched_downloads(
+        instance_root,
+        request,
+        &HashMap::new(),
+        &[],
+    )
+}
+
+fn apply_content_install_request_with_prefetched_downloads(
+    instance_root: &Path,
+    request: ContentInstallRequest,
+    prefetched_paths: &HashMap<PathBuf, PathBuf>,
+    additional_cleanup_paths: &[PathBuf],
+) -> Result<ContentDownloadOutcome, String> {
     let modrinth = ModrinthClient::default();
     let curseforge = CurseForgeClient::from_env();
     let mut added_files = Vec::new();
@@ -3442,8 +3771,17 @@ fn apply_content_install_request(
             resolved_download_from_version(version),
         ),
     };
+    tracing::info!(
+        target: CONTENT_UPDATE_LOG_TARGET,
+        instance_root = %instance_root.display(),
+        project = %root_entry.name,
+        version_id = %root_download.version_id,
+        prefetched = !prefetched_paths.is_empty(),
+        "applying content install request"
+    );
 
     let mut manifest = load_content_manifest(instance_root);
+    let mut deferred_cleanup = (!prefetched_paths.is_empty()).then(DeferredContentCleanup::default);
     let existing_project = installed_project_for_entry(&manifest, &root_entry)
         .map(|(key, project)| (key.to_owned(), project.clone()));
     let root_project_key = existing_project
@@ -3458,6 +3796,13 @@ fn apply_content_install_request(
             if let Some(record) = manifest.projects.get_mut(existing_project_key.as_str()) {
                 record.explicitly_installed = true;
             }
+            for path in additional_cleanup_paths {
+                if !path.exists() {
+                    continue;
+                }
+                remove_content_path(path.as_path())?;
+                removed_files.push(path.display().to_string());
+            }
             save_content_manifest(instance_root, &manifest)?;
             return Ok(ContentDownloadOutcome {
                 project_name: root_entry.name,
@@ -3467,6 +3812,14 @@ fn apply_content_install_request(
         }
         let dependents = manifest_dependents(&manifest, existing_project_key.as_str());
         if !dependents.is_empty() {
+            tracing::warn!(
+                target: CONTENT_UPDATE_LOG_TARGET,
+                instance_root = %instance_root.display(),
+                project = %root_entry.name,
+                existing_project_key = %existing_project_key,
+                dependents = %dependents.join(", "),
+                "rejecting content switch because dependents are still installed"
+            );
             return Err(format!(
                 "Cannot switch {} while it is required by {}.",
                 root_entry.name,
@@ -3479,6 +3832,7 @@ fn apply_content_install_request(
             existing_project_key.as_str(),
             true,
             &mut removed_files,
+            deferred_cleanup.as_mut(),
         )?;
     }
 
@@ -3495,11 +3849,40 @@ fn apply_content_install_request(
         curseforge.as_ref(),
         None,
         true,
+        prefetched_paths,
         &mut visited,
         &mut added_files,
         &mut removed_files,
+        deferred_cleanup.as_mut(),
     )?;
+    if let Some(cleanup) = deferred_cleanup.as_mut() {
+        cleanup.stale_paths.extend(
+            additional_cleanup_paths
+                .iter()
+                .filter(|path| path.exists())
+                .cloned(),
+        );
+    } else {
+        for path in additional_cleanup_paths {
+            if !path.exists() {
+                continue;
+            }
+            remove_content_path(path.as_path())?;
+            removed_files.push(path.display().to_string());
+        }
+    }
+    if let Some(cleanup) = deferred_cleanup.as_ref() {
+        apply_deferred_content_cleanup(instance_root, &manifest, cleanup, &mut removed_files)?;
+    }
     save_content_manifest(instance_root, &manifest)?;
+    tracing::info!(
+        target: CONTENT_UPDATE_LOG_TARGET,
+        instance_root = %instance_root.display(),
+        project = %root_entry.name,
+        added_files = added_files.len(),
+        removed_files = removed_files.len(),
+        "finished content install request"
+    );
 
     Ok(ContentDownloadOutcome {
         project_name: root_entry.name,
@@ -3521,9 +3904,11 @@ fn install_project_recursive(
     curseforge: Option<&CurseForgeClient>,
     parent_key: Option<&str>,
     explicit: bool,
+    prefetched_paths: &HashMap<PathBuf, PathBuf>,
     visited: &mut HashSet<String>,
     added_files: &mut Vec<String>,
     removed_files: &mut Vec<String>,
+    mut deferred_cleanup: Option<&mut DeferredContentCleanup>,
 ) -> Result<(), String> {
     let project_key = project_key_override
         .map(str::to_owned)
@@ -3572,10 +3957,58 @@ fn install_project_recursive(
         || existing
             .as_ref()
             .is_some_and(|project| project.explicitly_installed);
+    let prefetched_path = prefetched_paths.get(&target_path).cloned();
+    tracing::debug!(
+        target: CONTENT_UPDATE_LOG_TARGET,
+        instance_root = %instance_root.display(),
+        project_key = %project_key,
+        project = %entry.name,
+        target_path = %target_path.display(),
+        has_existing = existing.is_some(),
+        prefetched = prefetched_path.is_some(),
+        explicit,
+        "installing content project node"
+    );
 
     let install_result = (|| -> Result<(), String> {
-        if existing.is_some() || !target_path.exists() {
-            download_file(resolved.file_url.as_str(), target_path.as_path())?;
+        if existing.is_some() || !target_path.exists() || prefetched_path.is_some() {
+            if let Some(prefetched_path) = prefetched_path.as_ref() {
+                if !prefetched_path.exists() {
+                    return Err(format!(
+                        "prefetched content file missing at {}",
+                        prefetched_path.display()
+                    ));
+                }
+                if target_path.exists() {
+                    tracing::debug!(
+                        target: CONTENT_UPDATE_LOG_TARGET,
+                        target_path = %target_path.display(),
+                        "removing existing target before placing prefetched content"
+                    );
+                    remove_content_path(target_path.as_path())?;
+                }
+                tracing::debug!(
+                    target: CONTENT_UPDATE_LOG_TARGET,
+                    source_path = %prefetched_path.display(),
+                    target_path = %target_path.display(),
+                    "placing prefetched content file"
+                );
+                std::fs::rename(prefetched_path, target_path.as_path()).map_err(|err| {
+                    format!(
+                        "failed to place prefetched content {} at {}: {err}",
+                        prefetched_path.display(),
+                        target_path.display()
+                    )
+                })?;
+            } else {
+                tracing::debug!(
+                    target: CONTENT_UPDATE_LOG_TARGET,
+                    target_path = %target_path.display(),
+                    url = %resolved.file_url,
+                    "downloading content file directly"
+                );
+                download_file(resolved.file_url.as_str(), target_path.as_path())?;
+            }
             if !added_files
                 .iter()
                 .any(|path| path == &target_path.display().to_string())
@@ -3607,11 +4040,9 @@ fn install_project_recursive(
         );
 
         let mut dependency_keys = Vec::new();
-        for dependency in resolved.dependencies {
-            let Some(dep_entry) = dependency_to_browser_entry(&dependency, modrinth, curseforge)?
-            else {
-                continue;
-            };
+        for dep_entry in
+            dependency_to_browser_entries(resolved.dependencies.as_slice(), modrinth, curseforge)?
+        {
             let dep_resolved =
                 resolve_best_download(&dep_entry, game_version, loader, modrinth, curseforge)?
                     .ok_or_else(|| {
@@ -3633,9 +4064,11 @@ fn install_project_recursive(
                 curseforge,
                 Some(project_key.as_str()),
                 false,
+                prefetched_paths,
                 visited,
                 added_files,
                 removed_files,
+                deferred_cleanup.as_deref_mut(),
             )?;
         }
 
@@ -3652,6 +4085,7 @@ fn install_project_recursive(
                 target_path.as_path(),
                 staged_previous_path.as_deref(),
                 removed_files,
+                deferred_cleanup.as_deref_mut(),
             )?;
         }
 
@@ -3668,6 +4102,7 @@ fn install_project_recursive(
                 dependency_key.as_str(),
                 false,
                 removed_files,
+                deferred_cleanup.as_deref_mut(),
             )?;
         }
 
@@ -3675,8 +4110,24 @@ fn install_project_recursive(
     })();
 
     match install_result {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            tracing::debug!(
+                target: CONTENT_UPDATE_LOG_TARGET,
+                instance_root = %instance_root.display(),
+                project_key = %project_key,
+                project = %entry.name,
+                "installed content project node"
+            );
+            Ok(())
+        }
         Err(err) => {
+            tracing::error!(
+                target: CONTENT_UPDATE_LOG_TARGET,
+                instance_root = %instance_root.display(),
+                project_key = %project_key,
+                project = %entry.name,
+                "content project install failed: {err}"
+            );
             if let (Some(staged_previous_path), Some(previous_file_path)) =
                 (staged_previous_path.as_ref(), previous_file_path.as_ref())
             {
@@ -3714,6 +4165,7 @@ fn remove_installed_project(
     project_key: &str,
     force: bool,
     removed_files: &mut Vec<String>,
+    mut deferred_cleanup: Option<&mut DeferredContentCleanup>,
 ) -> Result<(), String> {
     let Some(existing) = manifest.projects.get(project_key).cloned() else {
         return Ok(());
@@ -3735,10 +4187,23 @@ fn remove_installed_project(
     }
 
     let file_path = instance_root.join(existing.file_path.as_str());
+    tracing::debug!(
+        target: CONTENT_UPDATE_LOG_TARGET,
+        instance_root = %instance_root.display(),
+        project_key = %project_key,
+        file_path = %file_path.display(),
+        deferred = deferred_cleanup.is_some(),
+        force,
+        "removing installed project entry"
+    );
     if file_path.exists() {
-        std::fs::remove_file(file_path.as_path())
-            .map_err(|err| format!("failed to remove {}: {err}", file_path.display()))?;
-        removed_files.push(file_path.display().to_string());
+        if let Some(cleanup) = deferred_cleanup.as_deref_mut() {
+            cleanup.stale_paths.push(file_path.clone());
+        } else {
+            std::fs::remove_file(file_path.as_path())
+                .map_err(|err| format!("failed to remove {}: {err}", file_path.display()))?;
+            removed_files.push(file_path.display().to_string());
+        }
     }
 
     for dependency_key in existing.direct_dependencies {
@@ -3748,6 +4213,7 @@ fn remove_installed_project(
             dependency_key.as_str(),
             false,
             removed_files,
+            deferred_cleanup.as_deref_mut(),
         )?;
     }
 
@@ -3776,6 +4242,16 @@ fn content_target_path(
     target_dir.join(target_name)
 }
 
+fn content_target_path_for_resolved_download(
+    instance_root: &Path,
+    entry: &BrowserProjectEntry,
+    resolved: &ResolvedDownload,
+) -> PathBuf {
+    let target_dir = instance_root.join(entry.content_type.folder_name());
+    let target_name = normalized_filename(resolved.file_name.as_str(), resolved.file_url.as_str());
+    target_dir.join(target_name)
+}
+
 fn stage_existing_file_for_update(
     existing_file_path: &Path,
     target_path: &Path,
@@ -3785,6 +4261,12 @@ fn stage_existing_file_for_update(
     }
 
     let staged_path = staged_update_backup_path(existing_file_path);
+    tracing::debug!(
+        target: CONTENT_UPDATE_LOG_TARGET,
+        existing_path = %existing_file_path.display(),
+        staged_path = %staged_path.display(),
+        "staging existing content file for replacement"
+    );
     std::fs::rename(existing_file_path, staged_path.as_path()).map_err(|err| {
         format!(
             "failed to stage existing content {} for replacement: {err}",
@@ -3799,10 +4281,17 @@ fn finalize_updated_file_replacement(
     target_path: &Path,
     staged_previous_path: Option<&Path>,
     removed_files: &mut Vec<String>,
+    deferred_cleanup: Option<&mut DeferredContentCleanup>,
 ) -> Result<(), String> {
     if let Some(staged_previous_path) = staged_previous_path {
-        remove_content_path(staged_previous_path)?;
-        removed_files.push(staged_previous_path.display().to_string());
+        if let Some(cleanup) = deferred_cleanup {
+            cleanup
+                .staged_paths
+                .push(staged_previous_path.to_path_buf());
+        } else {
+            remove_content_path(staged_previous_path)?;
+            removed_files.push(staged_previous_path.display().to_string());
+        }
         return Ok(());
     }
 
@@ -3810,8 +4299,68 @@ fn finalize_updated_file_replacement(
         return Ok(());
     }
 
-    remove_content_path(previous_file_path)?;
-    removed_files.push(previous_file_path.display().to_string());
+    if let Some(cleanup) = deferred_cleanup {
+        cleanup.stale_paths.push(previous_file_path.to_path_buf());
+    } else {
+        remove_content_path(previous_file_path)?;
+        removed_files.push(previous_file_path.display().to_string());
+    }
+    Ok(())
+}
+
+fn apply_deferred_content_cleanup(
+    instance_root: &Path,
+    manifest: &ContentInstallManifest,
+    cleanup: &DeferredContentCleanup,
+    removed_files: &mut Vec<String>,
+) -> Result<(), String> {
+    let active_paths = manifest
+        .projects
+        .values()
+        .map(|project| instance_root.join(project.file_path.as_str()))
+        .collect::<HashSet<_>>();
+    tracing::info!(
+        target: CONTENT_UPDATE_LOG_TARGET,
+        instance_root = %instance_root.display(),
+        stale_paths = cleanup.stale_paths.len(),
+        staged_paths = cleanup.staged_paths.len(),
+        active_paths = active_paths.len(),
+        "applying deferred content cleanup"
+    );
+
+    for staged_path in &cleanup.staged_paths {
+        if !staged_path.exists() {
+            continue;
+        }
+        tracing::debug!(
+            target: CONTENT_UPDATE_LOG_TARGET,
+            staged_path = %staged_path.display(),
+            "removing staged content backup"
+        );
+        remove_content_path(staged_path.as_path())?;
+        removed_files.push(staged_path.display().to_string());
+    }
+
+    for stale_path in &cleanup.stale_paths {
+        if active_paths.contains(stale_path) || !stale_path.exists() {
+            if active_paths.contains(stale_path) {
+                tracing::debug!(
+                    target: CONTENT_UPDATE_LOG_TARGET,
+                    stale_path = %stale_path.display(),
+                    "skipping stale-path removal because it is now active"
+                );
+            }
+            continue;
+        }
+        tracing::debug!(
+            target: CONTENT_UPDATE_LOG_TARGET,
+            stale_path = %stale_path.display(),
+            "removing deferred stale content path"
+        );
+        remove_content_path(stale_path.as_path())?;
+        removed_files.push(stale_path.display().to_string());
+    }
+
     Ok(())
 }
 
@@ -3954,6 +4503,14 @@ fn resolve_modrinth_download(
     let versions = modrinth
         .list_project_versions(project_id, &loaders, &game_versions)
         .map_err(|err| format!("Modrinth versions failed for {project_id}: {err}"))?;
+    let dependency_version_projects = modrinth_dependency_project_ids(
+        modrinth,
+        versions
+            .iter()
+            .flat_map(|version| version.dependencies.iter().cloned())
+            .collect::<Vec<_>>()
+            .as_slice(),
+    );
 
     Ok(versions
         .into_iter()
@@ -3963,20 +4520,10 @@ fn resolve_modrinth_download(
                 .iter()
                 .find(|file| file.primary)
                 .or_else(|| version.files.first())?;
-            let mut dependencies = Vec::new();
-            for dep in version.dependencies {
-                if !dep.dependency_type.eq_ignore_ascii_case("required") {
-                    continue;
-                }
-                if let Some(dep_project) = dep.project_id {
-                    dependencies.push(DependencyRef::ModrinthProject(dep_project));
-                } else if let Some(dep_version) = dep.version_id
-                    && let Ok(version) = modrinth.get_version(dep_version.as_str())
-                    && !version.project_id.trim().is_empty()
-                {
-                    dependencies.push(DependencyRef::ModrinthProject(version.project_id));
-                }
-            }
+            let dependencies = modrinth_dependency_refs(
+                version.dependencies.as_slice(),
+                &dependency_version_projects,
+            );
             Some(ResolvedDownload {
                 source: ManagedContentSource::Modrinth,
                 version_id: version.id.clone(),
@@ -4008,97 +4555,155 @@ fn resolve_curseforge_download(
     } else {
         None
     };
-
-    let files = curseforge
-        .list_mod_files(
-            project_id,
-            normalize_optional(game_version).as_deref(),
-            mod_loader_type,
-            0,
-            50,
-        )
-        .map_err(|err| format!("CurseForge files failed for {project_id}: {err}"))?;
-
-    Ok(files
-        .into_iter()
-        .filter_map(|file| {
-            let url = file.download_url?;
-            let mut dependencies = Vec::new();
-            for dep in file.dependencies {
-                if dep.relation_type == CONTENT_DOWNLOAD_REQUIRED_DEPENDENCY_RELATION_TYPE {
-                    dependencies.push(DependencyRef::CurseForgeProject(dep.mod_id));
-                }
-            }
-            Some(ResolvedDownload {
-                source: ManagedContentSource::CurseForge,
-                version_id: file.id.to_string(),
-                version_name: file.display_name.clone(),
-                file_url: url,
-                file_name: file.file_name,
-                published_at: file.file_date,
-                dependencies,
-            })
+    let project = curseforge
+        .get_mod(project_id)
+        .map_err(|err| format!("CurseForge project lookup failed for {project_id}: {err}"))?;
+    let Some(file_id) = project
+        .latest_files_indexes
+        .iter()
+        .filter(|index| {
+            normalize_optional(game_version)
+                .as_deref()
+                .is_none_or(|value| index.game_version.trim() == value)
         })
-        .max_by(|left, right| left.published_at.cmp(&right.published_at)))
-}
-
-fn dependency_to_browser_entry(
-    dependency: &DependencyRef,
-    modrinth: &ModrinthClient,
-    curseforge: Option<&CurseForgeClient>,
-) -> Result<Option<BrowserProjectEntry>, String> {
-    match dependency {
-        DependencyRef::ModrinthProject(project_id) => {
-            let project = modrinth.get_project(project_id.as_str()).map_err(|err| {
-                format!("Modrinth dependency lookup failed for {project_id}: {err}")
-            })?;
-            let Some(content_type) = parse_content_type(project.project_type.as_str()) else {
-                return Ok(None);
-            };
-            let name_key = normalize_lookup_key(project.title.as_str());
-            if name_key.is_empty() {
-                return Ok(None);
-            }
-            Ok(Some(BrowserProjectEntry {
-                dedupe_key: format!("{}::{name_key}", content_type.label().to_ascii_lowercase()),
-                name: project.title,
-                summary: project.description,
-                content_type,
-                icon_url: project.icon_url,
-                modrinth_project_id: Some(project.project_id),
-                curseforge_project_id: None,
-                sources: vec![ContentSource::Modrinth],
-                popularity_score: None,
-                updated_at: None,
-                relevance_rank: u32::MAX,
-            }))
-        }
-        DependencyRef::CurseForgeProject(project_id) => {
-            let Some(curseforge) = curseforge else {
-                return Ok(None);
-            };
-            let project = curseforge.get_mod(*project_id).map_err(|err| {
-                format!("CurseForge dependency lookup failed for {project_id}: {err}")
-            })?;
-            let name_key = normalize_lookup_key(project.name.as_str());
-            if name_key.is_empty() {
-                return Ok(None);
-            }
-            Ok(Some(BrowserProjectEntry {
-                dedupe_key: format!("mod::{name_key}"),
-                name: project.name,
-                summary: project.summary,
-                content_type: BrowserContentType::Mod,
-                icon_url: project.icon_url,
-                modrinth_project_id: None,
-                curseforge_project_id: Some(project.id),
-                sources: vec![ContentSource::CurseForge],
-                popularity_score: None,
-                updated_at: None,
-                relevance_rank: u32::MAX,
-            }))
+        .filter(|index| mod_loader_type.is_none_or(|value| index.mod_loader == Some(value)))
+        .map(|index| index.file_id)
+        .max()
+    else {
+        return Ok(None);
+    };
+    let Some(file) = curseforge
+        .get_files(&[file_id])
+        .map_err(|err| format!("CurseForge file lookup failed for {file_id}: {err}"))?
+        .into_iter()
+        .next()
+    else {
+        return Ok(None);
+    };
+    let Some(url) = file.download_url.clone() else {
+        return Ok(None);
+    };
+    let mut dependencies = Vec::new();
+    for dep in file.dependencies {
+        if dep.relation_type == CONTENT_DOWNLOAD_REQUIRED_DEPENDENCY_RELATION_TYPE {
+            dependencies.push(DependencyRef::CurseForgeProject(dep.mod_id));
         }
     }
+    Ok(Some(ResolvedDownload {
+        source: ManagedContentSource::CurseForge,
+        version_id: file.id.to_string(),
+        version_name: file.display_name.clone(),
+        file_url: url,
+        file_name: file.file_name,
+        published_at: file.file_date,
+        dependencies,
+    }))
+}
+
+fn dependency_to_browser_entries(
+    dependencies: &[DependencyRef],
+    modrinth: &ModrinthClient,
+    curseforge: Option<&CurseForgeClient>,
+) -> Result<Vec<BrowserProjectEntry>, String> {
+    let modrinth_ids = dependencies
+        .iter()
+        .filter_map(|dependency| match dependency {
+            DependencyRef::ModrinthProject(project_id) => Some(project_id.clone()),
+            DependencyRef::CurseForgeProject(_) => None,
+        })
+        .collect::<Vec<_>>();
+    let curseforge_ids = dependencies
+        .iter()
+        .filter_map(|dependency| match dependency {
+            DependencyRef::CurseForgeProject(project_id) => Some(*project_id),
+            DependencyRef::ModrinthProject(_) => None,
+        })
+        .collect::<Vec<_>>();
+
+    let modrinth_projects = modrinth
+        .get_projects(modrinth_ids.as_slice())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|project| (project.project_id.clone(), project))
+        .collect::<HashMap<_, _>>();
+    let curseforge_projects = if let Some(curseforge) = curseforge {
+        curseforge
+            .get_mods(curseforge_ids.as_slice())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|project| (project.id, project))
+            .collect::<HashMap<_, _>>()
+    } else {
+        HashMap::new()
+    };
+
+    let mut entries = Vec::new();
+    for dependency in dependencies {
+        match dependency {
+            DependencyRef::ModrinthProject(project_id) => {
+                let Some(project) = modrinth_projects.get(project_id.as_str()) else {
+                    continue;
+                };
+                if let Some(entry) = browser_entry_from_modrinth_dependency_project(project) {
+                    entries.push(entry);
+                }
+            }
+            DependencyRef::CurseForgeProject(project_id) => {
+                let Some(project) = curseforge_projects.get(project_id) else {
+                    continue;
+                };
+                if let Some(entry) = browser_entry_from_curseforge_dependency_project(project) {
+                    entries.push(entry);
+                }
+            }
+        }
+    }
+    Ok(entries)
+}
+
+fn browser_entry_from_modrinth_dependency_project(
+    project: &modrinth::Project,
+) -> Option<BrowserProjectEntry> {
+    let content_type = parse_content_type(project.project_type.as_str())?;
+    let name_key = normalize_lookup_key(project.title.as_str());
+    if name_key.is_empty() {
+        return None;
+    }
+    Some(BrowserProjectEntry {
+        dedupe_key: format!("{}::{name_key}", content_type.label().to_ascii_lowercase()),
+        name: project.title.clone(),
+        summary: project.description.clone(),
+        content_type,
+        icon_url: project.icon_url.clone(),
+        modrinth_project_id: Some(project.project_id.clone()),
+        curseforge_project_id: None,
+        sources: vec![ContentSource::Modrinth],
+        popularity_score: None,
+        updated_at: None,
+        relevance_rank: u32::MAX,
+    })
+}
+
+fn browser_entry_from_curseforge_dependency_project(
+    project: &curseforge::Project,
+) -> Option<BrowserProjectEntry> {
+    let name_key = normalize_lookup_key(project.name.as_str());
+    if name_key.is_empty() {
+        return None;
+    }
+    Some(BrowserProjectEntry {
+        dedupe_key: format!("mod::{name_key}"),
+        name: project.name.clone(),
+        summary: project.summary.clone(),
+        content_type: BrowserContentType::Mod,
+        icon_url: project.icon_url.clone(),
+        modrinth_project_id: None,
+        curseforge_project_id: Some(project.id),
+        sources: vec![ContentSource::CurseForge],
+        popularity_score: None,
+        updated_at: None,
+        relevance_rank: u32::MAX,
+    })
 }
 
 fn normalize_optional(value: &str) -> Option<String> {
@@ -4108,6 +4713,55 @@ fn normalize_optional(value: &str) -> Option<String> {
     } else {
         Some(trimmed.to_owned())
     }
+}
+
+fn prefetched_target_path(target_path: &Path) -> PathBuf {
+    let file_name = target_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("content.bin");
+    target_path.with_file_name(format!(".vertex-prefetch-{file_name}"))
+}
+
+fn modrinth_dependency_project_ids(
+    modrinth: &ModrinthClient,
+    dependencies: &[modrinth::ProjectDependency],
+) -> HashMap<String, String> {
+    let version_ids = dependencies
+        .iter()
+        .filter(|dependency| dependency.project_id.is_none())
+        .filter_map(|dependency| dependency.version_id.as_ref())
+        .cloned()
+        .collect::<Vec<_>>();
+    modrinth
+        .get_versions(version_ids.as_slice())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|version| !version.project_id.trim().is_empty())
+        .map(|version| (version.id, version.project_id))
+        .collect()
+}
+
+fn modrinth_dependency_refs(
+    dependencies: &[modrinth::ProjectDependency],
+    version_projects: &HashMap<String, String>,
+) -> Vec<DependencyRef> {
+    let mut resolved = Vec::new();
+    for dependency in dependencies {
+        if !dependency.dependency_type.eq_ignore_ascii_case("required") {
+            continue;
+        }
+        if let Some(project_id) = dependency.project_id.as_ref() {
+            resolved.push(DependencyRef::ModrinthProject(project_id.clone()));
+            continue;
+        }
+        if let Some(version_id) = dependency.version_id.as_ref()
+            && let Some(project_id) = version_projects.get(version_id.as_str())
+        {
+            resolved.push(DependencyRef::ModrinthProject(project_id.clone()));
+        }
+    }
+    resolved
 }
 
 fn identify_mod_file_by_hash(path: &Path) -> Result<UnifiedContentEntry, String> {
@@ -4206,6 +4860,7 @@ mod tests {
             mod_path.as_path(),
             Some(staged_path.as_path()),
             &mut removed_files,
+            None,
         )
         .expect("finalize replacement");
 
@@ -4235,12 +4890,131 @@ mod tests {
             new_path.as_path(),
             None,
             &mut removed_files,
+            None,
         )
         .expect("finalize replacement");
 
         assert!(!old_path.exists(), "old mod should be removed after update");
         assert!(new_path.exists(), "new mod should remain after update");
         assert_eq!(removed_files, vec![old_path.display().to_string()]);
+
+        let _ = std::fs::remove_dir_all(root.as_path());
+    }
+
+    #[test]
+    fn deferred_cleanup_skips_active_target_paths() {
+        let root = temp_test_root("deferred-cleanup");
+        let mods_dir = root.join("mods");
+        std::fs::create_dir_all(mods_dir.as_path()).expect("create mods dir");
+        let active_path = mods_dir.join("example.jar");
+        let stale_path = mods_dir.join("old-example.jar");
+        let staged_path = mods_dir.join(".vertex-update-backup-example.jar");
+        std::fs::write(active_path.as_path(), b"new").expect("write active mod");
+        std::fs::write(stale_path.as_path(), b"old").expect("write stale mod");
+        std::fs::write(staged_path.as_path(), b"backup").expect("write staged backup");
+
+        let mut manifest = ContentInstallManifest::default();
+        manifest.projects.insert(
+            "mod::example".to_owned(),
+            InstalledContentProject {
+                project_key: "mod::example".to_owned(),
+                name: "Example".to_owned(),
+                folder_name: "mods".to_owned(),
+                file_path: "mods/example.jar".to_owned(),
+                modrinth_project_id: None,
+                curseforge_project_id: None,
+                selected_source: None,
+                selected_version_id: None,
+                selected_version_name: None,
+                explicitly_installed: true,
+                direct_dependencies: Vec::new(),
+            },
+        );
+
+        let cleanup = DeferredContentCleanup {
+            stale_paths: vec![active_path.clone(), stale_path.clone()],
+            staged_paths: vec![staged_path.clone()],
+        };
+        let mut removed_files = Vec::new();
+        apply_deferred_content_cleanup(root.as_path(), &manifest, &cleanup, &mut removed_files)
+            .expect("apply deferred cleanup");
+
+        assert!(active_path.exists(), "active file should not be deleted");
+        assert!(!stale_path.exists(), "stale file should be deleted");
+        assert!(!staged_path.exists(), "staged backup should be deleted");
+        assert_eq!(
+            removed_files,
+            vec![
+                staged_path.display().to_string(),
+                stale_path.display().to_string()
+            ]
+        );
+
+        let _ = std::fs::remove_dir_all(root.as_path());
+    }
+
+    #[test]
+    fn parse_content_type_accepts_modrinth_resourcepack_slug() {
+        assert_eq!(
+            parse_content_type("resourcepack"),
+            Some(BrowserContentType::ResourcePack)
+        );
+        assert_eq!(
+            parse_content_type("texturepack"),
+            Some(BrowserContentType::ResourcePack)
+        );
+    }
+
+    #[test]
+    fn resolve_installed_file_paths_prefers_manifest_managed_path() {
+        let root = temp_test_root("managed-update-path");
+        let mods_dir = root.join("mods");
+        std::fs::create_dir_all(mods_dir.as_path()).expect("create mods dir");
+        let managed_path = mods_dir.join("example-2.0.jar");
+        let stale_path = mods_dir.join("example-1.0.jar");
+        std::fs::write(managed_path.as_path(), b"managed").expect("write managed mod");
+        std::fs::write(stale_path.as_path(), b"stale").expect("write stale mod");
+
+        let mut manifest = ContentInstallManifest::default();
+        manifest.projects.insert(
+            "mod::example".to_owned(),
+            InstalledContentProject {
+                project_key: "mod::example".to_owned(),
+                name: "Example".to_owned(),
+                folder_name: "mods".to_owned(),
+                file_path: "mods/example-2.0.jar".to_owned(),
+                modrinth_project_id: Some("example-project".to_owned()),
+                curseforge_project_id: None,
+                selected_source: Some(ManagedContentSource::Modrinth),
+                selected_version_id: Some("version-2".to_owned()),
+                selected_version_name: Some("2.0".to_owned()),
+                explicitly_installed: true,
+                direct_dependencies: Vec::new(),
+            },
+        );
+        let entry = BrowserProjectEntry {
+            dedupe_key: "mod::example".to_owned(),
+            name: "Example".to_owned(),
+            summary: String::new(),
+            content_type: BrowserContentType::Mod,
+            icon_url: None,
+            modrinth_project_id: Some("example-project".to_owned()),
+            curseforge_project_id: None,
+            sources: vec![ContentSource::Modrinth],
+            popularity_score: None,
+            updated_at: None,
+            relevance_rank: 0,
+        };
+
+        let (effective_path, stale_path_to_remove) = resolve_installed_file_paths_for_update(
+            root.as_path(),
+            &manifest,
+            &entry,
+            stale_path.as_path(),
+        );
+
+        assert_eq!(effective_path, managed_path);
+        assert_eq!(stale_path_to_remove, Some(stale_path.clone()));
 
         let _ = std::fs::remove_dir_all(root.as_path());
     }
