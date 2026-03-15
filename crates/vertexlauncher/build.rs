@@ -18,7 +18,7 @@ fn main() {
 
 fn emit_version_metadata() {
     let package_version =
-        env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.1.1-alpha".to_owned());
+        env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.1.2-Alpha".to_owned());
     let display_version = format_display_version(&package_version);
     println!("cargo:rustc-env=VERTEX_APP_VERSION={display_version}");
 
@@ -42,7 +42,7 @@ fn format_display_version(package_version: &str) -> String {
         .map(|(_, suffix)| suffix.split('.').next().unwrap_or(suffix))
         .unwrap_or("");
 
-    let channel = match prerelease {
+    let channel = match prerelease.to_ascii_lowercase().as_str() {
         "alpha" => " Alpha",
         "beta" => " Beta",
         "rc" => " RC",
