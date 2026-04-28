@@ -22,6 +22,7 @@ bash "${REPO_ROOT}/scripts/compile-slang-shaders.sh"
 # Remove host-compiled build-script executables and the final binary before
 # entering the container so that the container recompiles them against its glibc.
 find "${REPO_ROOT}/target" -name "build-script-build" -delete 2>/dev/null || true
+rm -rf "${REPO_ROOT}/target/release/build" 2>/dev/null || true
 rm -f "${REPO_ROOT}/target/x86_64-unknown-linux-gnu/release/vertexlauncher" 2>/dev/null || true
 rm -f "${REPO_ROOT}/target/release/vertexlauncher" 2>/dev/null || true
 

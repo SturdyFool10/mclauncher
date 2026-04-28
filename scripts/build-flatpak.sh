@@ -54,11 +54,13 @@ ensure_flathub_remote() {
 }
 
 ensure_runtime_bits() {
-    log "Ensuring runtime, SDK, and Rust extension are installed"
+    local arch="$1"
+
+    log "Ensuring runtime, SDK, and Rust extension are installed (${arch})"
     flatpak install --user -y flathub \
-        "${RUNTIME}//${RUNTIME_VERSION}" \
-        "${SDK}//${RUNTIME_VERSION}" \
-        "${RUST_EXT}//${RUST_EXT_TAG}"
+        "${RUNTIME}/${arch}/${RUNTIME_VERSION}" \
+        "${SDK}/${arch}/${RUNTIME_VERSION}" \
+        "${RUST_EXT}/${arch}/${RUST_EXT_TAG}"
 }
 
 # org.gnome.Sdk 49+ (freedesktop 25.08+) ships appstreamcli but dropped the
@@ -469,7 +471,7 @@ main() {
             continue
         fi
 
-        ensure_runtime_bits
+        ensure_runtime_bits "${arch}"
         ensure_appstream_compose "${arch}"
 
         if [[ "${source_prepared}" -eq 0 ]]; then

@@ -294,6 +294,11 @@ function Build-And-StageArtifact {
         throw "Missing built artifact: $builtArtifact"
     }
 
+    if ($Spec.Platform -eq "linux") {
+        Write-Host "  Built packaging input: $builtArtifact"
+        return
+    }
+
     Copy-Item -LiteralPath $builtArtifact -Destination $stagedArtifact -Force
     Write-Host "  Staged: $stagedArtifact"
 }
@@ -592,7 +597,7 @@ try {
 
     Write-Host ""
     Write-Host "Artifacts ready:"
-    foreach ($spec in ($windowsTargets + $linuxTargets + $macosTargets)) {
+    foreach ($spec in ($windowsTargets + $macosTargets)) {
         Write-Host "  $(Get-StagedArtifactPath -Platform $spec.Platform -Arch $spec.Arch -Extension $spec.Extension)"
     }
     foreach ($arch in $flatpakArtifactArches) {

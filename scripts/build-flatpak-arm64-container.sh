@@ -30,6 +30,7 @@ bash "${REPO_ROOT}/scripts/compile-slang-shaders.sh"
 # Remove host-compiled build-script executables and the aarch64 binary before
 # entering the container so that the container recompiles them against its glibc.
 find "${REPO_ROOT}/target" -name "build-script-build" -delete 2>/dev/null || true
+rm -rf "${REPO_ROOT}/target/release/build" 2>/dev/null || true
 rm -f "${REPO_ROOT}/target/aarch64-unknown-linux-gnu/release/vertexlauncher" 2>/dev/null || true
 
 mkdir -p "${WORK_ROOT}"
@@ -68,7 +69,7 @@ podman run --rm \
       >/dev/null
 
     apt-get install -y --no-install-recommends \
-      elfutils appstream-compose \
+      elfutils appstream-compose file \
       flatpak flatpak-builder ostree \
       python3 python3-aiohttp python3-tomlkit \
       qemu-user-static rsync xz-utils zstd \

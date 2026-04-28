@@ -30,6 +30,7 @@ bash "${REPO_ROOT}/scripts/compile-slang-shaders.sh"
 # Remove host-compiled build-script executables and the aarch64 binary before
 # entering the container so that the container recompiles them against its glibc.
 find "${REPO_ROOT}/target" -name "build-script-build" -delete 2>/dev/null || true
+rm -rf "${REPO_ROOT}/target/release/build" 2>/dev/null || true
 rm -f "${REPO_ROOT}/target/aarch64-unknown-linux-gnu/release/vertexlauncher" 2>/dev/null || true
 
 mkdir -p "${WORK_ROOT}" "${CARGO_REGISTRY_DIR}" "${CARGO_GIT_DIR}"
@@ -158,8 +159,5 @@ podman run --rm \
     echo "[linux-arm64] building release artifact..."
     cargo build --release --target aarch64-unknown-linux-gnu -p vertexlauncher
 
-    mkdir -p /workspace/target/release
-    cp /workspace/target/aarch64-unknown-linux-gnu/release/vertexlauncher \
-       /workspace/target/release/vertexlauncher-linux-arm64
-    echo "[linux-arm64] Staged: /workspace/target/release/vertexlauncher-linux-arm64"
+    echo "[linux-arm64] Built packaging input: /workspace/target/aarch64-unknown-linux-gnu/release/vertexlauncher"
   '

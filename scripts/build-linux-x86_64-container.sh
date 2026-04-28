@@ -25,6 +25,7 @@ bash "${REPO_ROOT}/scripts/compile-slang-shaders.sh"
 # perform this cleanup on the host before launching the container.
 # The container will then recompile them against its own glibc (Ubuntu 24.04).
 find "${REPO_ROOT}/target" -name "build-script-build" -delete 2>/dev/null || true
+rm -rf "${REPO_ROOT}/target/release/build" 2>/dev/null || true
 rm -f "${REPO_ROOT}/target/x86_64-unknown-linux-gnu/release/vertexlauncher" 2>/dev/null || true
 rm -f "${REPO_ROOT}/target/release/vertexlauncher" 2>/dev/null || true
 
@@ -100,8 +101,5 @@ podman run --rm \
     # AppImages bundle their own libraries so the glibc floor of the raw binary
     # does not affect end-user compatibility.
 
-    mkdir -p /workspace/target/release
-    cp /workspace/target/x86_64-unknown-linux-gnu/release/vertexlauncher \
-       /workspace/target/release/vertexlauncher-linux-x86_64
-    echo "[linux-x86_64] Staged: /workspace/target/release/vertexlauncher-linux-x86_64"
+    echo "[linux-x86_64] Built packaging input: /workspace/target/x86_64-unknown-linux-gnu/release/vertexlauncher"
   '
