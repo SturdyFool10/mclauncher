@@ -14,6 +14,8 @@ use self::instance_screenshot_overlay_button_result::InstanceScreenshotOverlayBu
 use self::instance_screenshot_overlay_result::InstanceScreenshotOverlayResult;
 use self::instance_screenshot_tile_action::InstanceScreenshotTileAction;
 
+const INSTANCE_SCREENSHOT_TILE_TEXTURE_MAX_EDGE: u32 = 1024;
+
 pub(super) fn render_instance_screenshot_gallery(
     ui: &mut Ui,
     text_ui: &mut TextUi,
@@ -65,6 +67,7 @@ pub(super) fn render_instance_screenshot_gallery(
 
     let mut open_key = None;
     let mut delete_key = None;
+    let viewer_open = state.screenshot_viewer.is_some();
     let screenshots = &state.screenshots;
     let screenshot_images = &mut state.screenshot_images;
     egui::ScrollArea::vertical()
@@ -85,6 +88,7 @@ pub(super) fn render_instance_screenshot_gallery(
                         &screenshots[index],
                         tile_height,
                         retained_image_keys,
+                        viewer_open,
                     );
                     if action.open_viewer {
                         open_key = Some(screenshot_key(screenshots[index].path.as_path()));
@@ -119,6 +123,7 @@ fn render_instance_screenshot_tile(
     screenshot: &InstanceScreenshotEntry,
     tile_height: f32,
     retained_image_keys: &mut HashSet<String>,
+    viewer_open: bool,
 ) -> InstanceScreenshotTileAction {
     let width = ui.available_width().max(1.0);
     let tile_size = egui::vec2(width, tile_height);
@@ -136,11 +141,12 @@ fn render_instance_screenshot_tile(
     let image_bytes = screenshot_images.bytes(image_key.as_str());
     retained_image_keys.insert(image_key.clone());
     if let Some(bytes) = image_bytes.as_ref() {
-        match image_textures::request_texture(
+        match image_textures::request_texture_with_max_edge(
             ui.ctx(),
             image_key,
             Arc::clone(bytes),
             TextureOptions::LINEAR,
+            INSTANCE_SCREENSHOT_TILE_TEXTURE_MAX_EDGE,
         ) {
             image_textures::ManagedTextureStatus::Ready(texture) => {
                 egui::Image::from_texture(&texture)
@@ -169,12 +175,13 @@ fn render_instance_screenshot_tile(
         paint_instance_screenshot_placeholder(ui, text_ui, rect, image_status);
     }
 
-    let tile_contains_pointer = ui_pointer_over_rect(ui, rect);
+    let tile_contains_pointer = !viewer_open && ui_pointer_over_rect(ui, rect);
     let overlay_memory_id = image_response.id.with("instance_screenshot_overlay_active");
-    let overlay_was_active = ui
-        .ctx()
-        .data_mut(|data| data.get_temp::<bool>(overlay_memory_id))
-        .unwrap_or(false);
+    let overlay_was_active = !viewer_open
+        && ui
+            .ctx()
+            .data_mut(|data| data.get_temp::<bool>(overlay_memory_id))
+            .unwrap_or(false);
     let mut overlay_clicked = false;
     let mut action = InstanceScreenshotTileAction::default();
     let mut overlay_result = InstanceScreenshotOverlayResult::default();
@@ -954,8 +961,10 @@ pub(super) fn poll_instance_screenshot_scan_results(state: &mut InstanceScreenSt
                 if request_id != state.screenshot_scan_request_serial {
                     continue;
                 }
-                state.screenshots = screenshots;
-                state.mark_screenshot_layout_dirty();
+                if screenshots != state.screenshots {
+                    state.screenshots = screenshots;
+                    state.mark_screenshot_layout_dirty();
+                }
                 state.last_screenshot_scan_at = Some(Instant::now());
                 state.screenshot_scan_in_flight = false;
             }

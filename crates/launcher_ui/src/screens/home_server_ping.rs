@@ -456,10 +456,9 @@ pub(super) fn server_meta_line(
     };
     let motd = ping
         .and_then(|snapshot| snapshot.motd.as_deref())
-        .map(str::trim)
+        .map(collapse_motd_for_meta_line)
         .filter(|value| !value.is_empty())
-        .unwrap_or("motd unavailable")
-        .to_owned();
+        .unwrap_or_else(|| "motd unavailable".to_owned());
     format!(
         "{} | {} | {} | {} | {} | last used {}",
         format!("instance {}", server.instance_name),
@@ -469,6 +468,10 @@ pub(super) fn server_meta_line(
         ping_text,
         format_time_ago(server.last_used_at_ms, now_ms)
     )
+}
+
+fn collapse_motd_for_meta_line(motd: &str) -> String {
+    motd.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 pub(super) fn render_server_ping_icon(ui: &mut Ui, ping: Option<&ServerPingSnapshot>) {

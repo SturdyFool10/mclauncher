@@ -716,6 +716,7 @@ fn render_search_tag_chips(
         font_size: 14.0,
         line_height: 18.0,
         color: ui.visuals().text_color(),
+        wrap: false,
         ..style::body(ui)
     };
     ui.horizontal_wrapped(|ui| {
@@ -730,6 +731,16 @@ fn render_search_tag_chips(
                 text_color.r(),
                 text_color.g(),
                 text_color.b()
+            );
+            let max_chip_width = ui.available_width().max(1.0);
+            let max_text_width =
+                (max_chip_width - 22.0 - ui.spacing().item_spacing.x - 16.0).max(1.0);
+            let display_tag = truncate_single_line_text_with_ellipsis(
+                text_ui,
+                ui,
+                tag.as_str(),
+                max_text_width,
+                &tag_style,
             );
             egui::Frame::new()
                 .fill(fill)
@@ -755,7 +766,7 @@ fn render_search_tag_chips(
                         let _ = text_ui.label(
                             ui,
                             ("content_browser_search_tag", tag.as_str()),
-                            tag.as_str(),
+                            display_tag.as_str(),
                             &tag_style,
                         );
                     });

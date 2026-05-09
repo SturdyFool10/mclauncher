@@ -15,11 +15,13 @@ const IMAGE_TEXTURE_STALE_FRAMES: u64 = 600;
 const IMAGE_TEXTURE_FETCH_MAX_PER_FRAME: usize = 128;
 const IMAGE_TEXTURE_UPLOAD_MAX_PER_FRAME: usize = 32;
 const IMAGE_TEXTURE_UPLOAD_MAX_BYTES_PER_FRAME: usize = 16 * 1024 * 1024;
+const IMAGE_TEXTURE_EVICT_GRACE_FRAMES: u64 = 2;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct ManagedTextureKey {
     source_key: String,
     options: TextureOptions,
+    max_edge: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -100,9 +102,36 @@ pub fn request_texture(
     bytes: Arc<[u8]>,
     options: TextureOptions,
 ) -> ManagedTextureStatus {
-    let key = ManagedTextureKey {
-        source_key: source_key.into(),
+    request_texture_inner(ctx, source_key.into(), bytes, options, None)
+}
+
+pub fn request_texture_with_max_edge(
+    ctx: &Context,
+    source_key: impl Into<String>,
+    bytes: Arc<[u8]>,
+    options: TextureOptions,
+    max_edge: u32,
+) -> ManagedTextureStatus {
+    request_texture_inner(
+        ctx,
+        source_key.into(),
+        bytes,
         options,
+        Some(max_edge.max(1)),
+    )
+}
+
+fn request_texture_inner(
+    ctx: &Context,
+    source_key: String,
+    bytes: Arc<[u8]>,
+    options: TextureOptions,
+    max_edge: Option<u32>,
+) -> ManagedTextureStatus {
+    let key = ManagedTextureKey {
+        source_key,
+        options,
+        max_edge,
     };
     let Ok(mut cache) = cache().lock() else {
         tracing::error!(
@@ -233,6 +262,7 @@ fn poll_updates(ctx: &Context, cache: &mut ManagedTextureCache) {
                     upload.key.options,
                 );
                 let approx_bytes = texture.byte_size().max(upload.approx_bytes);
+                let frame_index = cache.frame_index;
                 let evicted = cache.entries.write(|state| {
                     state.insert_without_eviction(
                         upload.key.clone(),
@@ -243,7 +273,7 @@ fn poll_updates(ctx: &Context, cache: &mut ManagedTextureCache) {
                         approx_bytes,
                     );
                     state.evict_to_budget_where(|_, entry| {
-                        !matches!(entry.value.state, ManagedTextureState::Loading)
+                        can_evict_budget_entry(entry, frame_index)
                     })
                 });
                 drop(evicted);
@@ -255,6 +285,7 @@ fn poll_updates(ctx: &Context, cache: &mut ManagedTextureCache) {
                     error = %err,
                     "Failed to decode managed image texture."
                 );
+                let frame_index = cache.frame_index;
                 let evicted = cache.entries.write(|state| {
                     state.insert_without_eviction(
                         key,
@@ -265,7 +296,7 @@ fn poll_updates(ctx: &Context, cache: &mut ManagedTextureCache) {
                         0,
                     );
                     state.evict_to_budget_where(|_, entry| {
-                        !matches!(entry.value.state, ManagedTextureState::Loading)
+                        can_evict_budget_entry(entry, frame_index)
                     })
                 });
                 drop(evicted);
@@ -297,12 +328,20 @@ fn trim_stale(cache: &mut ManagedTextureCache) {
 }
 
 fn trim_to_budget(cache: &mut ManagedTextureCache) {
+    let frame_index = cache.frame_index;
     let evicted = cache.entries.write(|state| {
-        state.evict_to_budget_where(|_, entry| {
-            !matches!(entry.value.state, ManagedTextureState::Loading)
-        })
+        state.evict_to_budget_where(|_, entry| can_evict_budget_entry(entry, frame_index))
     });
     drop(evicted);
+}
+
+fn can_evict_budget_entry(
+    entry: &shared_lru::LruEntry<ManagedTextureEntry>,
+    frame_index: u64,
+) -> bool {
+    !matches!(entry.value.state, ManagedTextureState::Loading)
+        && frame_index.saturating_sub(entry.value.last_touched_frame)
+            > IMAGE_TEXTURE_EVICT_GRACE_FRAMES
 }
 
 fn decode_ready_texture(
@@ -310,8 +349,19 @@ fn decode_ready_texture(
     bytes: &[u8],
 ) -> Result<ReadyTextureUpload, String> {
     let image = image::load_from_memory(bytes)
-        .map_err(|err| format!("failed to decode '{}': {err}", key.source_key))?
-        .to_rgba8();
+        .map_err(|err| format!("failed to decode '{}': {err}", key.source_key))?;
+    let image = if let Some(max_edge) = key.max_edge {
+        let width = image.width();
+        let height = image.height();
+        if width.max(height) > max_edge {
+            image.resize(max_edge, max_edge, image::imageops::FilterType::Triangle)
+        } else {
+            image
+        }
+    } else {
+        image
+    }
+    .to_rgba8();
     let normalized_image = if image.width() == 0 || image.height() == 0 {
         image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 0, 0]))
     } else {

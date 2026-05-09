@@ -66,7 +66,7 @@ impl InstanceScreenTab {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct InstanceScreenshotEntry {
     pub(super) path: PathBuf,
     pub(super) file_name: String,

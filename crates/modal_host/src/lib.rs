@@ -194,6 +194,49 @@ pub fn begin_frame(ctx: &Context) {
     ctx.data_mut(|data| data.insert_temp(Id::new(MODAL_HOST_STATE_ID), state));
 }
 
+pub fn block_previous_frame_modal_input(ctx: &Context) {
+    let state = ctx
+        .data(|data| data.get_temp::<ModalHostState>(Id::new(MODAL_HOST_STATE_ID)))
+        .unwrap_or_default();
+    let Some((stack_index, entry)) = state
+        .stack
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, entry)| entry.blocks_lower_layers)
+    else {
+        return;
+    };
+
+    let viewport_rect = ctx.input(|input| input.content_rect());
+    let modal_order = order_for_modal(entry.layer, stack_index);
+    // Use one level below the modal so the modal is always definitively above the
+    // blocker in egui's strict layer ordering. Within the same Order, egui's Z-priority
+    // is ambiguous (depends on which Area was most recently brought to front), so placing
+    // the blocker at a lower Order guarantees it never steals hover from the modal.
+    let blocker_order = one_order_below(modal_order);
+    let area_id = Id::new((entry.id, "previous_frame_modal_input_blocker_area"));
+    let blocker_id = Id::new((entry.id, "previous_frame_modal_input_blocker"));
+    Area::new(area_id)
+        .order(blocker_order)
+        .fixed_pos(viewport_rect.min)
+        .interactable(true)
+        .show(ctx, |ui| {
+            let local_rect = Rect::from_min_size(egui::Pos2::ZERO, viewport_rect.size());
+            let _ = ui.interact(local_rect, blocker_id, egui::Sense::click_and_drag());
+        });
+}
+
+pub fn lower_layers_blocked(ctx: &Context) -> bool {
+    ctx.data(|data| {
+        data.get_temp::<ModalHostState>(Id::new(MODAL_HOST_STATE_ID))
+            .unwrap_or_default()
+            .stack
+            .iter()
+            .any(|entry| entry.blocks_lower_layers)
+    })
+}
+
 pub fn end_frame(ctx: &Context) {
     let mut state = ctx
         .data_mut(|data| data.get_temp::<ModalHostState>(Id::new(MODAL_HOST_STATE_ID)))
@@ -427,5 +470,13 @@ fn order_for_modal(layer: ModalLayer, stack_index: usize) -> Order {
         (ModalLayer::Blocking | ModalLayer::Critical, _) => Order::Tooltip,
         (_, index) if index > 0 => Order::Tooltip,
         _ => Order::Foreground,
+    }
+}
+
+fn one_order_below(order: Order) -> Order {
+    match order {
+        Order::Debug | Order::Tooltip => Order::Foreground,
+        Order::Foreground => Order::Middle,
+        Order::Middle | Order::Background => Order::Background,
     }
 }

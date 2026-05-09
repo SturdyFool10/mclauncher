@@ -38,6 +38,7 @@ use self::screenshot_tile_action::ScreenshotTileAction;
 pub(super) use self::screenshot_viewer_state::ScreenshotViewerState;
 
 static SCREENSHOT_RESULTS: OnceLock<Mutex<ScreenshotResultChannel>> = OnceLock::new();
+const HOME_SCREENSHOT_TILE_TEXTURE_MAX_EDGE: u32 = 1024;
 
 pub(super) fn purge_screenshot_state(ctx: &egui::Context) {
     ctx.data_mut(|data| {
@@ -373,9 +374,18 @@ pub(super) fn refresh_screenshot_state(
         return;
     }
 
-    let request_id = state.latest_requested_screenshot_scan_id.saturating_add(1);
     let request = build_screenshot_scan_request(instances, config);
+    let candidates = collect_screenshot_candidates(&request);
+    if !force
+        && request.scanned_instance_count == state.scanned_screenshot_instance_count
+        && candidates == state.screenshot_candidates
+    {
+        state.last_screenshot_scan_at = Some(Instant::now());
+        state.screenshot_scan_pending = false;
+        return;
+    }
 
+    let request_id = state.latest_requested_screenshot_scan_id.saturating_add(1);
     state.latest_requested_screenshot_scan_id = request_id;
     state.screenshot_scan_pending = true;
     state.screenshot_scan_ready = true;
@@ -384,7 +394,6 @@ pub(super) fn refresh_screenshot_state(
     state.screenshots.clear();
     state.mark_screenshot_layout_dirty();
 
-    let candidates = collect_screenshot_candidates(&request);
     state.scanned_screenshot_instance_count = request.scanned_instance_count;
     state.screenshot_candidates = candidates;
     state.screenshot_loaded_count = 0;
@@ -488,6 +497,7 @@ pub(super) fn render_screenshot_gallery(
     let mut open_screenshot_key = None;
     let mut delete_screenshot_key = None;
     let mut should_load_more = false;
+    let viewer_open = state.screenshot_viewer.is_some();
     egui::ScrollArea::vertical()
         .id_salt("home_screenshots_scroll")
         .auto_shrink([false, false])
@@ -510,6 +520,7 @@ pub(super) fn render_screenshot_gallery(
                         tile_height,
                         retained_image_keys,
                         metrics,
+                        viewer_open,
                     );
                     if action.open_viewer {
                         open_screenshot_key = Some(screenshots[index].key());
@@ -560,6 +571,7 @@ fn render_screenshot_tile(
     tile_height: f32,
     retained_image_keys: &mut HashSet<String>,
     metrics: HomeUiMetrics,
+    viewer_open: bool,
 ) -> ScreenshotTileAction {
     let width = ui.available_width().max(1.0);
     let tile_size = egui::vec2(width, tile_height);
@@ -575,11 +587,12 @@ fn render_screenshot_tile(
     let image_status = screenshot_images.request(image_key.clone(), screenshot.path.clone());
     let image_bytes = screenshot_images.bytes(image_key.as_str());
     if let Some(bytes) = image_bytes.as_ref() {
-        match image_textures::request_texture(
+        match image_textures::request_texture_with_max_edge(
             ui.ctx(),
             image_key.clone(),
             Arc::clone(bytes),
             TextureOptions::LINEAR,
+            HOME_SCREENSHOT_TILE_TEXTURE_MAX_EDGE,
         ) {
             image_textures::ManagedTextureStatus::Ready(texture) => {
                 egui::Image::from_texture(&texture)
@@ -598,12 +611,13 @@ fn render_screenshot_tile(
         paint_screenshot_tile_placeholder(ui, text_ui, rect, image_status);
     }
 
-    let tile_contains_pointer = ui_pointer_over_rect(ui, rect);
+    let tile_contains_pointer = !viewer_open && ui_pointer_over_rect(ui, rect);
     let overlay_memory_id = image_response.id.with("home_screenshot_overlay_active");
-    let overlay_was_active = ui
-        .ctx()
-        .data_mut(|data| data.get_temp::<bool>(overlay_memory_id))
-        .unwrap_or(false);
+    let overlay_was_active = !viewer_open
+        && ui
+            .ctx()
+            .data_mut(|data| data.get_temp::<bool>(overlay_memory_id))
+            .unwrap_or(false);
     let mut overlay_clicked = false;
     let mut action = ScreenshotTileAction::default();
     let mut overlay_result = ScreenshotOverlayResult::default();

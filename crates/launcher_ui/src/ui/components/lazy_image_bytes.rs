@@ -7,8 +7,9 @@ use shared_lru::ThreadSafeLru;
 
 use super::{image_memory::load_image_path_for_memory, image_textures};
 
-const LAZY_IMAGE_MAX_BYTES: usize = 64 * 1024 * 1024;
+const LAZY_IMAGE_MAX_BYTES: usize = 256 * 1024 * 1024;
 const LAZY_IMAGE_STALE_FRAMES: u64 = 900;
+const LAZY_IMAGE_EVICT_GRACE_FRAMES: u64 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LazyImageBytesStatus {
@@ -107,6 +108,7 @@ impl LazyImageBytes {
             match result {
                 Ok(bytes) => {
                     let approx_bytes = bytes.len();
+                    let frame_index = self.frame_index;
                     let evicted = self.states.write(|state| {
                         state.insert_without_eviction(
                             key.clone(),
@@ -117,7 +119,7 @@ impl LazyImageBytes {
                             approx_bytes,
                         );
                         state.evict_to_budget_where(|_, entry| {
-                            !matches!(entry.value.state, LazyImageBytesState::Loading)
+                            can_evict_budget_entry(entry, frame_index)
                         })
                     });
                     for (evicted_key, _) in evicted {
@@ -131,6 +133,7 @@ impl LazyImageBytes {
                         error = %err,
                         "Lazy image load failed."
                     );
+                    let frame_index = self.frame_index;
                     let evicted = self.states.write(|state| {
                         state.insert_without_eviction(
                             key.clone(),
@@ -141,7 +144,7 @@ impl LazyImageBytes {
                             0,
                         );
                         state.evict_to_budget_where(|_, entry| {
-                            !matches!(entry.value.state, LazyImageBytesState::Loading)
+                            can_evict_budget_entry(entry, frame_index)
                         })
                     });
                     for (evicted_key, _) in evicted {
@@ -284,10 +287,9 @@ impl LazyImageBytes {
     }
 
     fn trim_to_budget(&mut self, _ctx: &egui::Context) {
+        let frame_index = self.frame_index;
         let evicted = self.states.write(|state| {
-            state.evict_to_budget_where(|_, entry| {
-                !matches!(entry.value.state, LazyImageBytesState::Loading)
-            })
+            state.evict_to_budget_where(|_, entry| can_evict_budget_entry(entry, frame_index))
         });
         for (key, entry) in evicted {
             if !matches!(entry.state, LazyImageBytesState::Loading) {
@@ -295,4 +297,10 @@ impl LazyImageBytes {
             }
         }
     }
+}
+
+fn can_evict_budget_entry(entry: &shared_lru::LruEntry<LazyImageEntry>, frame_index: u64) -> bool {
+    !matches!(entry.value.state, LazyImageBytesState::Loading)
+        && frame_index.saturating_sub(entry.value.last_touched_frame)
+            > LAZY_IMAGE_EVICT_GRACE_FRAMES
 }

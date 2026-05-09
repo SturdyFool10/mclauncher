@@ -231,6 +231,8 @@ pub fn render(
     text_ui: &mut TextUi,
 ) -> ScreenOutput {
     modal::begin_frame(ui.ctx());
+    let lower_layers_blocked = modal::lower_layers_blocked(ui.ctx());
+    modal::block_previous_frame_modal_input(ui.ctx());
     let content_browser_open_id = ui.make_persistent_id("content_browser_open_state");
     let content_browser_was_open = ui
         .ctx()
@@ -246,162 +248,189 @@ pub fn render(
             .then(|| config.curseforge_api_key().to_owned()),
     );
 
-    let output = match screen {
-        AppScreen::Home => {
-            let output = home::render(
-                ui,
-                text_ui,
-                instances,
-                config,
-                active_username,
-                active_launch_auth,
-                streamer_mode,
-            );
-            ScreenOutput {
-                instances_changed: false,
-                requested_screen: output.requested_screen,
-                selected_instance_id: output.selected_instance_id,
-                delete_requested_instance_id: output.delete_requested_instance_id,
-                discover_install_requested: None,
-                menu_presence_context: Some(MenuPresenceContext::Home(output.presence_section)),
+    macro_rules! render_active_screen {
+        ($ui:expr) => {
+            match screen {
+                AppScreen::Home => {
+                    let output = home::render(
+                        $ui,
+                        text_ui,
+                        instances,
+                        config,
+                        active_username,
+                        active_launch_auth,
+                        streamer_mode,
+                    );
+                    ScreenOutput {
+                        instances_changed: false,
+                        requested_screen: output.requested_screen,
+                        selected_instance_id: output.selected_instance_id,
+                        delete_requested_instance_id: output.delete_requested_instance_id,
+                        discover_install_requested: None,
+                        menu_presence_context: Some(MenuPresenceContext::Home(
+                            output.presence_section,
+                        )),
+                    }
+                }
+                AppScreen::Library => {
+                    let installations_root =
+                        config.minecraft_installations_root_path().to_path_buf();
+                    let output = library::render(
+                        $ui,
+                        text_ui,
+                        selected_instance_id,
+                        active_username,
+                        active_launch_auth,
+                        active_account_owns_minecraft,
+                        streamer_mode,
+                        instances,
+                        installations_root.as_path(),
+                        config,
+                        account_avatars_by_key,
+                    );
+                    ScreenOutput {
+                        instances_changed: false,
+                        requested_screen: output.requested_screen,
+                        selected_instance_id: output.selected_instance_id,
+                        delete_requested_instance_id: None,
+                        discover_install_requested: None,
+                        menu_presence_context: Some(MenuPresenceContext::Screen(
+                            AppScreen::Library,
+                        )),
+                    }
+                }
+                AppScreen::ContentBrowser => {
+                    let output = content_browser::render(
+                        $ui,
+                        text_ui,
+                        selected_instance_id,
+                        instances,
+                        config,
+                        content_browser_state,
+                        reset_content_browser,
+                    );
+                    ScreenOutput {
+                        instances_changed: false,
+                        requested_screen: output.requested_screen,
+                        selected_instance_id: None,
+                        delete_requested_instance_id: None,
+                        discover_install_requested: None,
+                        menu_presence_context: Some(MenuPresenceContext::Screen(
+                            AppScreen::ContentBrowser,
+                        )),
+                    }
+                }
+                AppScreen::Discover | AppScreen::DiscoverDetail => {
+                    let output = discover::render(
+                        $ui,
+                        text_ui,
+                        discover_state,
+                        screen == AppScreen::DiscoverDetail,
+                    );
+                    ScreenOutput {
+                        requested_screen: output.requested_screen,
+                        discover_install_requested: output.install_requested,
+                        menu_presence_context: Some(MenuPresenceContext::Screen(screen)),
+                        ..ScreenOutput::default()
+                    }
+                }
+                AppScreen::Skins => {
+                    skins::render(
+                        $ui,
+                        text_ui,
+                        selected_instance_id,
+                        active_launch_auth,
+                        skin_manager_opened,
+                        skin_manager_account_switched,
+                        streamer_mode,
+                        wgpu_target_format,
+                        skin_preview_msaa_samples,
+                        config.skin_preview_aa_mode(),
+                        config.skin_preview_texel_aa_mode(),
+                        config.skin_preview_motion_blur_enabled(),
+                        config.skin_preview_motion_blur_amount(),
+                        config.skin_preview_motion_blur_shutter_frames(),
+                        config.skin_preview_motion_blur_sample_count(),
+                        config.skin_preview_3d_layers_enabled(),
+                        config.skin_preview_fresh_format_enabled(),
+                    );
+                    ScreenOutput {
+                        menu_presence_context: Some(MenuPresenceContext::Screen(AppScreen::Skins)),
+                        ..ScreenOutput::default()
+                    }
+                }
+                AppScreen::Settings => {
+                    settings::render(
+                        $ui,
+                        text_ui,
+                        config,
+                        available_ui_fonts,
+                        available_ui_font_labels,
+                        available_emoji_fonts,
+                        available_emoji_font_labels,
+                        available_themes,
+                        available_theme_labels,
+                        settings_info,
+                    );
+                    ScreenOutput {
+                        menu_presence_context: Some(MenuPresenceContext::Screen(
+                            AppScreen::Settings,
+                        )),
+                        ..ScreenOutput::default()
+                    }
+                }
+                AppScreen::Legal => {
+                    legal::render($ui, text_ui);
+                    ScreenOutput {
+                        menu_presence_context: Some(MenuPresenceContext::Screen(AppScreen::Legal)),
+                        ..ScreenOutput::default()
+                    }
+                }
+                AppScreen::Console => {
+                    console::render($ui, text_ui);
+                    ScreenOutput {
+                        menu_presence_context: Some(MenuPresenceContext::Screen(
+                            AppScreen::Console,
+                        )),
+                        ..ScreenOutput::default()
+                    }
+                }
+                AppScreen::Instance => {
+                    let output = instance::render(
+                        $ui,
+                        text_ui,
+                        selected_instance_id,
+                        active_username,
+                        active_launch_auth,
+                        active_account_owns_minecraft,
+                        streamer_mode,
+                        instances,
+                        config,
+                        account_avatars_by_key,
+                    );
+                    ScreenOutput {
+                        instances_changed: output.instances_changed,
+                        requested_screen: output.requested_screen,
+                        selected_instance_id: None,
+                        delete_requested_instance_id: None,
+                        discover_install_requested: None,
+                        menu_presence_context: Some(MenuPresenceContext::Instance(
+                            output.presence_section,
+                        )),
+                    }
+                }
             }
-        }
-        AppScreen::Library => {
-            let installations_root = config.minecraft_installations_root_path().to_path_buf();
-            let output = library::render(
-                ui,
-                text_ui,
-                selected_instance_id,
-                active_username,
-                active_launch_auth,
-                active_account_owns_minecraft,
-                streamer_mode,
-                instances,
-                installations_root.as_path(),
-                config,
-                account_avatars_by_key,
-            );
-            ScreenOutput {
-                instances_changed: false,
-                requested_screen: output.requested_screen,
-                selected_instance_id: output.selected_instance_id,
-                delete_requested_instance_id: None,
-                discover_install_requested: None,
-                menu_presence_context: Some(MenuPresenceContext::Screen(AppScreen::Library)),
-            }
-        }
-        AppScreen::ContentBrowser => {
-            let output = content_browser::render(
-                ui,
-                text_ui,
-                selected_instance_id,
-                instances,
-                config,
-                content_browser_state,
-                reset_content_browser,
-            );
-            ScreenOutput {
-                instances_changed: false,
-                requested_screen: output.requested_screen,
-                selected_instance_id: None,
-                delete_requested_instance_id: None,
-                discover_install_requested: None,
-                menu_presence_context: Some(MenuPresenceContext::Screen(AppScreen::ContentBrowser)),
-            }
-        }
-        AppScreen::Discover | AppScreen::DiscoverDetail => {
-            let output = discover::render(
-                ui,
-                text_ui,
-                discover_state,
-                screen == AppScreen::DiscoverDetail,
-            );
-            ScreenOutput {
-                requested_screen: output.requested_screen,
-                discover_install_requested: output.install_requested,
-                menu_presence_context: Some(MenuPresenceContext::Screen(screen)),
-                ..ScreenOutput::default()
-            }
-        }
-        AppScreen::Skins => {
-            skins::render(
-                ui,
-                text_ui,
-                selected_instance_id,
-                active_launch_auth,
-                skin_manager_opened,
-                skin_manager_account_switched,
-                streamer_mode,
-                wgpu_target_format,
-                skin_preview_msaa_samples,
-                config.skin_preview_aa_mode(),
-                config.skin_preview_texel_aa_mode(),
-                config.skin_preview_motion_blur_enabled(),
-                config.skin_preview_motion_blur_amount(),
-                config.skin_preview_motion_blur_shutter_frames(),
-                config.skin_preview_motion_blur_sample_count(),
-                config.skin_preview_3d_layers_enabled(),
-                config.skin_preview_fresh_format_enabled(),
-            );
-            ScreenOutput {
-                menu_presence_context: Some(MenuPresenceContext::Screen(AppScreen::Skins)),
-                ..ScreenOutput::default()
-            }
-        }
-        AppScreen::Settings => {
-            settings::render(
-                ui,
-                text_ui,
-                config,
-                available_ui_fonts,
-                available_ui_font_labels,
-                available_emoji_fonts,
-                available_emoji_font_labels,
-                available_themes,
-                available_theme_labels,
-                settings_info,
-            );
-            ScreenOutput {
-                menu_presence_context: Some(MenuPresenceContext::Screen(AppScreen::Settings)),
-                ..ScreenOutput::default()
-            }
-        }
-        AppScreen::Legal => {
-            legal::render(ui, text_ui);
-            ScreenOutput {
-                menu_presence_context: Some(MenuPresenceContext::Screen(AppScreen::Legal)),
-                ..ScreenOutput::default()
-            }
-        }
-        AppScreen::Console => {
-            console::render(ui, text_ui);
-            ScreenOutput {
-                menu_presence_context: Some(MenuPresenceContext::Screen(AppScreen::Console)),
-                ..ScreenOutput::default()
-            }
-        }
-        AppScreen::Instance => {
-            let output = instance::render(
-                ui,
-                text_ui,
-                selected_instance_id,
-                active_username,
-                active_launch_auth,
-                active_account_owns_minecraft,
-                streamer_mode,
-                instances,
-                config,
-                account_avatars_by_key,
-            );
-            ScreenOutput {
-                instances_changed: output.instances_changed,
-                requested_screen: output.requested_screen,
-                selected_instance_id: None,
-                delete_requested_instance_id: None,
-                discover_install_requested: None,
-                menu_presence_context: Some(MenuPresenceContext::Instance(output.presence_section)),
-            }
-        }
+        };
+    }
+
+    let output = if lower_layers_blocked {
+        let mut output = ScreenOutput::default();
+        ui.add_enabled_ui(false, |ui| {
+            output = render_active_screen!(ui);
+        });
+        output
+    } else {
+        render_active_screen!(ui)
     };
 
     render_global_overlays(

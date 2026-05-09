@@ -25,6 +25,7 @@ use crate::{
 
 const DISCOVER_PROVIDER_LIMIT: u32 = 36;
 const DISCOVER_CARD_GAP: f32 = 12.0;
+const DISCOVER_MASONRY_WIDTH_BUCKET_POINTS: f32 = 32.0;
 const VERSION_CATALOG_FETCH_TIMEOUT: Duration = Duration::from_secs(75);
 const DETAIL_VERSIONS_FETCH_TIMEOUT: Duration = Duration::from_secs(45);
 const DISCOVER_SEARCH_CACHE_MAX_ENTRIES: usize = 10;
@@ -485,7 +486,9 @@ fn build_discover_masonry_layout(
     let content_width = ui.available_width().max(metrics.card_min_width);
     let (column_count, column_width) =
         responsive_columns(content_width, metrics.card_min_width, DISCOVER_CARD_GAP, 4);
-    let width_bucket = (column_width / 16.0).round().max(1.0) as u32;
+    let width_bucket = (column_width / DISCOVER_MASONRY_WIDTH_BUCKET_POINTS)
+        .round()
+        .max(1.0) as u32;
     let entries_fingerprint = discover_entries_fingerprint(entries, width_bucket);
     if let Some(cached) = masonry_layout_cache.as_ref()
         && cached.width_bucket == width_bucket
@@ -552,7 +555,9 @@ fn discover_tile_estimated_height(
 fn discover_tile_height_cache_key(dedupe_key: &str, column_width: f32) -> (String, u32) {
     (
         dedupe_key.to_owned(),
-        (column_width / 16.0).round().max(1.0) as u32,
+        (column_width / DISCOVER_MASONRY_WIDTH_BUCKET_POINTS)
+            .round()
+            .max(1.0) as u32,
     )
 }
 
@@ -1220,6 +1225,7 @@ fn render_search_tag_chips(
         font_size: 14.0,
         line_height: 18.0,
         color: ui.visuals().text_color(),
+        wrap: false,
         ..style::body(ui)
     };
     ui.add_space(style::SPACE_SM);
@@ -1235,6 +1241,16 @@ fn render_search_tag_chips(
                 text_color.r(),
                 text_color.g(),
                 text_color.b()
+            );
+            let max_chip_width = ui.available_width().max(1.0);
+            let max_text_width =
+                (max_chip_width - 22.0 - ui.spacing().item_spacing.x - 16.0).max(1.0);
+            let display_tag = truncate_single_line_text_with_ellipsis(
+                text_ui,
+                ui,
+                tag.as_str(),
+                max_text_width,
+                &tag_style,
             );
             egui::Frame::new()
                 .fill(fill)
@@ -1260,7 +1276,7 @@ fn render_search_tag_chips(
                         let _ = text_ui.label(
                             ui,
                             ("discover_search_tag", tag.as_str()),
-                            tag.as_str(),
+                            display_tag.as_str(),
                             &tag_style,
                         );
                     });

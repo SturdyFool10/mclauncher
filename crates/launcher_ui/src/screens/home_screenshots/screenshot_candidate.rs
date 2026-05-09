@@ -1,6 +1,6 @@
 use super::*;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ScreenshotCandidate {
     pub(crate) instance_name: String,
     pub(crate) path: PathBuf,

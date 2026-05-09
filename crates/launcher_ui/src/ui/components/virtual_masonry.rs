@@ -1,6 +1,8 @@
 use egui::{Rect, Ui};
 use ui_foundation::responsive_columns;
 
+const MASONRY_WIDTH_BUCKET_POINTS: f32 = 32.0;
+
 #[derive(Clone, Debug)]
 pub struct VirtualMasonryItem {
     pub item_index: usize,
@@ -41,7 +43,9 @@ pub fn build_virtual_masonry_layout(
     let content_width = ui.available_width().max(min_column_width);
     let (column_count, column_width) =
         responsive_columns(content_width, min_column_width, gap, max_columns);
-    let width_bucket = (column_width / 16.0).round().max(1.0) as u32;
+    let width_bucket = (column_width / MASONRY_WIDTH_BUCKET_POINTS)
+        .round()
+        .max(1.0) as u32;
     if let Some(cached) = cache.as_ref()
         && cached.width_bucket == width_bucket
         && cached.revision == revision
