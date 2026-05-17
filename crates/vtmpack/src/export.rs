@@ -1,20 +1,24 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
-    io::Cursor,
+    io::{Cursor, Write},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use managed_content::{
-    CONTENT_MANIFEST_FILE_NAME, ContentInstallManifest, ManagedContentSource, content_manifest_path,
+    CONTENT_MANIFEST_FILE_NAME, ContentInstallManifest, InstalledContentProject,
+    ManagedContentSource, content_manifest_path,
 };
 
 use crate::constants::VTMPACK_MANIFEST_VERSION;
 use crate::{
-    VtmpackDownloadableEntry, VtmpackExportOptions, VtmpackExportProgress, VtmpackExportStats,
-    VtmpackInstanceMetadata, VtmpackManifest, VtmpackProviderMode,
+    VtmpackCompressionMode, VtmpackDownloadableEntry, VtmpackExportOptions, VtmpackExportProgress,
+    VtmpackExportStats, VtmpackInstanceMetadata, VtmpackManifest, VtmpackProviderMode,
 };
+
+const XZ_LEVEL_BEST: u32 = 9;
+const ZPAQ_ULTRA_METHOD: &str = "5";
 
 pub fn sanitize_managed_manifest_for_export(
     manifest: &ContentInstallManifest,
@@ -68,8 +72,21 @@ where
             .and_then(|raw| toml::from_str::<ContentInstallManifest>(&raw).ok())
             .unwrap_or_default()
     };
+    let selected_root_entries = options
+        .included_root_entries
+        .iter()
+        .filter_map(|(entry, included)| included.then_some(entry.as_str()))
+        .collect::<HashSet<_>>();
+
+    progress(progress_update(
+        "Checking mods against Modrinth hashes...",
+        1,
+        1,
+    ));
+    let rediscovered_manifest =
+        rediscover_modrinth_mods(instance_root, &managed_manifest, &selected_root_entries);
     let sanitized_managed_manifest =
-        sanitize_managed_manifest_for_export(&managed_manifest, options);
+        sanitize_managed_manifest_for_export(&rediscovered_manifest, options);
 
     let downloadable_entries = sanitized_managed_manifest
         .projects
@@ -94,6 +111,8 @@ where
                     .map(|source| source.label().to_owned()),
                 selected_version_id: project.selected_version_id.clone(),
                 selected_version_name: project.selected_version_name.clone(),
+                selected_file_sha1: project.selected_file_sha1.clone(),
+                selected_file_sha512: project.selected_file_sha512.clone(),
             })
         })
         .collect::<Vec<_>>();
@@ -101,12 +120,6 @@ where
     let downloadable_paths = downloadable_entries
         .iter()
         .map(|entry| normalize_pack_path(entry.file_path.as_path()))
-        .collect::<HashSet<_>>();
-
-    let selected_root_entries = options
-        .included_root_entries
-        .iter()
-        .filter_map(|(entry, included)| included.then_some(entry.as_str()))
         .collect::<HashSet<_>>();
 
     progress(progress_update("Scanning exportable files...", 1, 1));
@@ -229,104 +242,82 @@ where
             tracing::warn!(target: "vertexlauncher/io", op = "file_create", path = %output_path.display(), error = %err, context = "create vtmpack archive");
             format!("failed to create {}: {err}", output_path.display())
         })?;
-    let encoder = xz2::write::XzEncoder::new(output_file, 9);
-    let mut archive = tar::Builder::new(encoder);
     let total_steps = 3 + bundled_mod_files.len() + config_files.len() + additional_files.len();
     let mut completed_steps = 0usize;
+    let bundled_mod_file_count = pack_manifest.bundled_mods.len();
+    let config_file_count = pack_manifest.configs.len();
+    let additional_file_count = pack_manifest.additional_paths.len();
 
-    let manifest_bytes = toml::to_string_pretty(&pack_manifest)
-        .map_err(|err| format!("failed to serialize vtmpack manifest: {err}"))?
-        .into_bytes();
-    progress(progress_update(
-        "Writing pack manifest...",
-        completed_steps,
-        total_steps,
-    ));
-    append_bytes_to_archive(&mut archive, "manifest.toml", manifest_bytes.as_slice())?;
-    completed_steps += 1;
-
-    if !sanitized_managed_manifest.projects.is_empty() {
-        let raw = toml::to_string_pretty(&sanitized_managed_manifest)
-            .map_err(|err| format!("failed to serialize export content manifest: {err}"))?;
-        progress(progress_update(
-            "Writing content metadata...",
-            completed_steps,
-            total_steps,
-        ));
-        append_bytes_to_archive(
-            &mut archive,
-            "metadata/vertex-content-manifest.toml",
-            raw.as_bytes(),
-        )?;
-    } else {
-        progress(progress_update(
-            "Skipping empty content metadata...",
-            completed_steps,
-            total_steps,
-        ));
+    match options.compression_mode {
+        VtmpackCompressionMode::Standard => {
+            let encoder = xz2::write::XzEncoder::new(output_file, XZ_LEVEL_BEST);
+            let mut archive = tar::Builder::new(encoder);
+            write_tar_payload(
+                &mut archive,
+                &pack_manifest,
+                &sanitized_managed_manifest,
+                bundled_mod_files,
+                mods_dir.as_path(),
+                config_files,
+                configs_dir.as_path(),
+                additional_files,
+                instance_root,
+                total_steps,
+                &mut completed_steps,
+                &mut progress,
+            )?;
+            progress(progress_update(
+                "Finalizing archive...",
+                completed_steps,
+                total_steps,
+            ));
+            archive
+                .finish()
+                .map_err(|err| format!("failed to finalize archive: {err}"))?;
+            let encoder = archive
+                .into_inner()
+                .map_err(|err| format!("failed to flush archive stream: {err}"))?;
+            encoder
+                .finish()
+                .map_err(|err| format!("failed to finalize xz stream: {err}"))?;
+        }
+        VtmpackCompressionMode::Extreme => {
+            let mut tar_bytes = Vec::new();
+            {
+                let mut archive = tar::Builder::new(&mut tar_bytes);
+                write_tar_payload(
+                    &mut archive,
+                    &pack_manifest,
+                    &sanitized_managed_manifest,
+                    bundled_mod_files,
+                    mods_dir.as_path(),
+                    config_files,
+                    configs_dir.as_path(),
+                    additional_files,
+                    instance_root,
+                    total_steps,
+                    &mut completed_steps,
+                    &mut progress,
+                )?;
+                progress(progress_update(
+                    "Compressing archive with ZPAQ...",
+                    completed_steps,
+                    total_steps,
+                ));
+                archive
+                    .finish()
+                    .map_err(|err| format!("failed to finalize uncompressed archive: {err}"))?;
+            }
+            zpaq_rs::compress_stream(
+                Cursor::new(tar_bytes),
+                output_file,
+                ZPAQ_ULTRA_METHOD,
+                Some("vtmpack.tar"),
+                None,
+            )
+            .map_err(|err| format!("failed to finalize zpaq stream: {err}"))?;
+        }
     }
-    completed_steps += 1;
-
-    for file in bundled_mod_files {
-        let relative = file
-            .strip_prefix(mods_dir.as_path())
-            .unwrap_or(file.as_path());
-        let target = Path::new("bundled_mods").join(relative);
-        progress(progress_update(
-            &format!("Bundling mod {}", target.display()),
-            completed_steps,
-            total_steps,
-        ));
-        archive
-            .append_path_with_name(file.as_path(), target.as_path())
-            .map_err(|err| format!("failed to append bundled mod {}: {err}", file.display()))?;
-        completed_steps += 1;
-    }
-
-    for file in config_files {
-        let relative = file
-            .strip_prefix(configs_dir.as_path())
-            .unwrap_or(file.as_path());
-        let target = Path::new("configs").join(relative);
-        progress(progress_update(
-            &format!("Bundling config {}", target.display()),
-            completed_steps,
-            total_steps,
-        ));
-        archive
-            .append_path_with_name(file.as_path(), target.as_path())
-            .map_err(|err| format!("failed to append config file {}: {err}", file.display()))?;
-        completed_steps += 1;
-    }
-
-    for file in additional_files {
-        let relative = file.strip_prefix(instance_root).unwrap_or(file.as_path());
-        let target = Path::new("root_entries").join(relative);
-        progress(progress_update(
-            &format!("Bundling {}", target.display()),
-            completed_steps,
-            total_steps,
-        ));
-        archive
-            .append_path_with_name(file.as_path(), target.as_path())
-            .map_err(|err| format!("failed to append extra file {}: {err}", file.display()))?;
-        completed_steps += 1;
-    }
-
-    progress(progress_update(
-        "Finalizing archive...",
-        completed_steps,
-        total_steps,
-    ));
-    archive
-        .finish()
-        .map_err(|err| format!("failed to finalize archive: {err}"))?;
-    let encoder = archive
-        .into_inner()
-        .map_err(|err| format!("failed to flush archive stream: {err}"))?;
-    encoder
-        .finish()
-        .map_err(|err| format!("failed to finalize xz stream: {err}"))?;
     completed_steps += 1;
     progress(progress_update(
         "Export complete.",
@@ -335,10 +326,309 @@ where
     ));
 
     Ok(VtmpackExportStats {
-        bundled_mod_files: pack_manifest.bundled_mods.len(),
-        config_files: pack_manifest.configs.len(),
-        additional_files: pack_manifest.additional_paths.len(),
+        bundled_mod_files: bundled_mod_file_count,
+        config_files: config_file_count,
+        additional_files: additional_file_count,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_tar_payload<W, F>(
+    archive: &mut tar::Builder<W>,
+    pack_manifest: &VtmpackManifest,
+    sanitized_managed_manifest: &ContentInstallManifest,
+    bundled_mod_files: Vec<PathBuf>,
+    mods_dir: &Path,
+    config_files: Vec<PathBuf>,
+    configs_dir: &Path,
+    additional_files: Vec<PathBuf>,
+    instance_root: &Path,
+    total_steps: usize,
+    completed_steps: &mut usize,
+    progress: &mut F,
+) -> Result<(), String>
+where
+    W: Write,
+    F: FnMut(VtmpackExportProgress),
+{
+    let manifest_bytes = toml::to_string_pretty(pack_manifest)
+        .map_err(|err| format!("failed to serialize vtmpack manifest: {err}"))?
+        .into_bytes();
+    progress(progress_update(
+        "Writing pack manifest...",
+        *completed_steps,
+        total_steps,
+    ));
+    append_bytes_to_archive(archive, "manifest.toml", manifest_bytes.as_slice())?;
+    *completed_steps += 1;
+
+    if !sanitized_managed_manifest.projects.is_empty() {
+        let raw = toml::to_string_pretty(sanitized_managed_manifest)
+            .map_err(|err| format!("failed to serialize export content manifest: {err}"))?;
+        progress(progress_update(
+            "Writing content metadata...",
+            *completed_steps,
+            total_steps,
+        ));
+        append_bytes_to_archive(
+            archive,
+            "metadata/vertex-content-manifest.toml",
+            raw.as_bytes(),
+        )?;
+    } else {
+        progress(progress_update(
+            "Skipping empty content metadata...",
+            *completed_steps,
+            total_steps,
+        ));
+    }
+    *completed_steps += 1;
+
+    for file in bundled_mod_files {
+        let relative = file.strip_prefix(mods_dir).unwrap_or(file.as_path());
+        let target = Path::new("bundled_mods").join(relative);
+        progress(progress_update(
+            &format!("Bundling mod {}", target.display()),
+            *completed_steps,
+            total_steps,
+        ));
+        archive
+            .append_path_with_name(file.as_path(), target.as_path())
+            .map_err(|err| format!("failed to append bundled mod {}: {err}", file.display()))?;
+        *completed_steps += 1;
+    }
+
+    for file in config_files {
+        let relative = file.strip_prefix(configs_dir).unwrap_or(file.as_path());
+        let target = Path::new("configs").join(relative);
+        progress(progress_update(
+            &format!("Bundling config {}", target.display()),
+            *completed_steps,
+            total_steps,
+        ));
+        archive
+            .append_path_with_name(file.as_path(), target.as_path())
+            .map_err(|err| format!("failed to append config file {}: {err}", file.display()))?;
+        *completed_steps += 1;
+    }
+
+    for file in additional_files {
+        let relative = file.strip_prefix(instance_root).unwrap_or(file.as_path());
+        let target = Path::new("root_entries").join(relative);
+        progress(progress_update(
+            &format!("Bundling {}", target.display()),
+            *completed_steps,
+            total_steps,
+        ));
+        archive
+            .append_path_with_name(file.as_path(), target.as_path())
+            .map_err(|err| format!("failed to append extra file {}: {err}", file.display()))?;
+        *completed_steps += 1;
+    }
+
+    Ok(())
+}
+
+fn rediscover_modrinth_mods(
+    instance_root: &Path,
+    manifest: &ContentInstallManifest,
+    selected_root_entries: &HashSet<&str>,
+) -> ContentInstallManifest {
+    if !selected_root_entries.contains("mods") {
+        return manifest.clone();
+    }
+
+    let mods_dir = instance_root.join("mods");
+    if !mods_dir.is_dir() {
+        return manifest.clone();
+    }
+
+    let entries = match fs::read_dir(mods_dir.as_path()) {
+        Ok(entries) => entries,
+        Err(err) => {
+            tracing::warn!(
+                target: "vertexlauncher/vtmpack",
+                path = %mods_dir.display(),
+                error = %err,
+                "failed to read mods directory for Modrinth hash rediscovery"
+            );
+            return manifest.clone();
+        }
+    };
+
+    let mut mod_files = Vec::<DiscoveredModFile>::new();
+    for entry in entries.flatten() {
+        let absolute_path = entry.path();
+        if !absolute_path.is_file() {
+            continue;
+        }
+        let relative_path = absolute_path
+            .strip_prefix(instance_root)
+            .unwrap_or(absolute_path.as_path());
+        let file_path = normalize_pack_path(relative_path);
+        if file_path.as_os_str().is_empty() {
+            continue;
+        }
+        match modrinth::hash_file_sha1_and_sha512_hex(absolute_path.as_path()) {
+            Ok((sha1, sha512)) => mod_files.push(DiscoveredModFile {
+                absolute_path,
+                file_path,
+                sha1,
+                sha512,
+            }),
+            Err(err) => {
+                tracing::warn!(
+                    target: "vertexlauncher/vtmpack",
+                    path = %absolute_path.display(),
+                    error = %err,
+                    "failed to hash mod file for Modrinth rediscovery"
+                );
+            }
+        }
+    }
+
+    if mod_files.is_empty() {
+        return manifest.clone();
+    }
+
+    let client = modrinth::Client::default();
+    let sha512_hashes = mod_files
+        .iter()
+        .map(|file| file.sha512.clone())
+        .collect::<Vec<_>>();
+    let version_matches = match client.get_versions_from_hashes(&sha512_hashes, "sha512") {
+        Ok(matches) => matches,
+        Err(err) => {
+            tracing::warn!(
+                target: "vertexlauncher/vtmpack",
+                error = %err,
+                "Modrinth hash rediscovery failed"
+            );
+            HashMap::new()
+        }
+    };
+
+    let project_ids = version_matches
+        .values()
+        .map(|version| version.project_id.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let projects_by_id = client
+        .get_projects(&project_ids)
+        .map(|projects| {
+            projects
+                .into_iter()
+                .map(|project| (project.project_id.clone(), project))
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_else(|err| {
+            tracing::warn!(
+                target: "vertexlauncher/vtmpack",
+                error = %err,
+                "failed to fetch Modrinth projects for rediscovered mods"
+            );
+            HashMap::new()
+        });
+
+    let mut projects = manifest.projects.clone();
+    let mut path_keys = projects
+        .iter()
+        .map(|(key, project)| {
+            (
+                normalize_pack_path(project.file_path.as_path()),
+                key.clone(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    for mod_file in mod_files {
+        let Some(version) = version_matches.get(mod_file.sha512.as_str()) else {
+            continue;
+        };
+        if !version.files.iter().any(|file| {
+            file.hashes
+                .get("sha512")
+                .is_some_and(|hash| hash.eq_ignore_ascii_case(mod_file.sha512.as_str()))
+        }) {
+            tracing::warn!(
+                target: "vertexlauncher/vtmpack",
+                path = %mod_file.absolute_path.display(),
+                version_id = %version.id,
+                "Modrinth hash lookup returned a version without the exact matched file hash; leaving file bundled"
+            );
+            continue;
+        }
+
+        let project_key = path_keys
+            .get(&mod_file.file_path)
+            .cloned()
+            .unwrap_or_else(|| {
+                unique_project_key(&projects, format!("modrinth:{}", version.project_id))
+            });
+        let existing = projects.get(&project_key).cloned().unwrap_or_default();
+        let project_name = projects_by_id
+            .get(version.project_id.as_str())
+            .map(|project| project.title.clone())
+            .filter(|name| !name.trim().is_empty())
+            .or_else(|| non_empty(existing.name.as_str()))
+            .unwrap_or_else(|| {
+                mod_file
+                    .file_path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "Modrinth mod".to_owned())
+            });
+        let project = InstalledContentProject {
+            project_key: project_key.clone(),
+            name: project_name,
+            folder_name: "mods".to_owned(),
+            file_path: mod_file.file_path.clone(),
+            modrinth_project_id: Some(version.project_id.clone()),
+            curseforge_project_id: existing.curseforge_project_id,
+            selected_source: Some(ManagedContentSource::Modrinth),
+            selected_version_id: Some(version.id.clone()),
+            selected_version_name: non_empty(version.version_number.as_str()),
+            selected_file_sha1: Some(mod_file.sha1),
+            selected_file_sha512: Some(mod_file.sha512),
+            pack_managed: existing.pack_managed,
+            explicitly_installed: existing.explicitly_installed,
+            direct_dependencies: existing.direct_dependencies,
+        };
+        path_keys.insert(project.file_path.clone(), project_key.clone());
+        projects.insert(project_key, project);
+    }
+
+    ContentInstallManifest { projects }
+}
+
+struct DiscoveredModFile {
+    absolute_path: PathBuf,
+    file_path: PathBuf,
+    sha1: String,
+    sha512: String,
+}
+
+fn unique_project_key(
+    projects: &BTreeMap<String, InstalledContentProject>,
+    preferred: String,
+) -> String {
+    if !projects.contains_key(&preferred) {
+        return preferred;
+    }
+    let mut index = 2usize;
+    loop {
+        let candidate = format!("{preferred}:{index}");
+        if !projects.contains_key(&candidate) {
+            return candidate;
+        }
+        index += 1;
+    }
+}
+
+fn non_empty(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
 }
 
 pub fn sync_vtmpack_export_options(instance_root: &Path, options: &mut VtmpackExportOptions) {
@@ -408,8 +698,8 @@ fn collect_regular_files_recursive(root: &Path, out: &mut Vec<PathBuf>) -> std::
     Ok(())
 }
 
-fn append_bytes_to_archive(
-    archive: &mut tar::Builder<xz2::write::XzEncoder<fs::File>>,
+fn append_bytes_to_archive<W: Write>(
+    archive: &mut tar::Builder<W>,
     path: &str,
     bytes: &[u8],
 ) -> Result<(), String> {
@@ -488,6 +778,7 @@ mod tests {
             &manifest,
             &VtmpackExportOptions {
                 provider_mode: VtmpackProviderMode::ExcludeCurseForge,
+                compression_mode: VtmpackCompressionMode::Standard,
                 included_root_entries: BTreeMap::new(),
             },
         );

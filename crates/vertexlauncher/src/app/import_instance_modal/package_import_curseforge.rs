@@ -198,6 +198,8 @@ pub(super) fn build_curseforge_base_manifest_from_resolved(
                 selected_source: Some(ManagedContentSource::CurseForge),
                 selected_version_id: Some(manifest_file.file_id.to_string()),
                 selected_version_name: non_empty(file.display_name.as_str()),
+                selected_file_sha1: None,
+                selected_file_sha512: None,
                 pack_managed: true,
                 explicitly_installed: false,
                 direct_dependencies: Vec::new(),

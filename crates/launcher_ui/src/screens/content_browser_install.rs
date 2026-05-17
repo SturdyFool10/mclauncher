@@ -310,6 +310,8 @@ fn install_project_recursive(
                 selected_source: Some(resolved.source),
                 selected_version_id: Some(resolved.version_id.clone()),
                 selected_version_name: Some(resolved.version_name.clone()),
+                selected_file_sha1: None,
+                selected_file_sha512: None,
                 pack_managed: false,
                 explicitly_installed,
                 direct_dependencies: Vec::new(),

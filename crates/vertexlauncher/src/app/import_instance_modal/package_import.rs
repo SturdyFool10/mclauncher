@@ -230,6 +230,8 @@ pub(super) fn build_mrpack_base_manifest(
                 selected_source: Some(ManagedContentSource::Modrinth),
                 selected_version_id: Some(version.id),
                 selected_version_name: non_empty(version.version_number.as_str()),
+                selected_file_sha1: None,
+                selected_file_sha512: None,
                 pack_managed: true,
                 explicitly_installed: false,
                 direct_dependencies: Vec::new(),
@@ -543,10 +545,7 @@ pub(super) fn extract_vtmpack_payload(
     completed_steps: &mut usize,
     progress: &mut dyn FnMut(ImportProgress),
 ) -> Result<(), String> {
-    let file = fs_file_open_logged(package_path)
-        .map_err(|err| format!("failed to open {}: {err}", package_path.display()))?;
-    let decoder = xz2::read::XzDecoder::new(file);
-    let mut archive = tar::Archive::new(decoder);
+    let mut archive = open_vtmpack_tar_archive(package_path)?;
 
     for entry in archive
         .entries()
@@ -673,15 +672,9 @@ pub(super) fn download_vtmpack_entry(
             let version = ModrinthClient::default()
                 .get_version(version_id)
                 .map_err(|err| format!("failed to fetch Modrinth version {version_id}: {err}"))?;
-            let file = version
-                .files
-                .iter()
-                .find(|file| file.primary)
-                .or_else(|| version.files.first())
-                .ok_or_else(|| {
-                    format!("no downloadable file found for Modrinth version {version_id}")
-                })?;
-            download_file(file.url.as_str(), destination)
+            let file = select_vtmpack_modrinth_file(entry, &version)?;
+            download_file(file.url.as_str(), destination)?;
+            verify_vtmpack_download_hash(entry, destination)
         }
         Some(ManagedSource::CurseForge) => {
             let project_id = entry
@@ -710,15 +703,9 @@ pub(super) fn download_vtmpack_entry(
                     .map_err(|err| {
                         format!("failed to fetch Modrinth fallback version {version_id}: {err}")
                     })?;
-                let file = version
-                    .files
-                    .iter()
-                    .find(|file| file.primary)
-                    .or_else(|| version.files.first())
-                    .ok_or_else(|| {
-                        format!("no downloadable file found for Modrinth version {version_id}")
-                    })?;
-                return download_file(file.url.as_str(), destination);
+                let file = select_vtmpack_modrinth_file(entry, &version)?;
+                download_file(file.url.as_str(), destination)?;
+                return verify_vtmpack_download_hash(entry, destination);
             }
             Err(format!(
                 "download source for {} could not be determined from the pack metadata",
@@ -726,6 +713,94 @@ pub(super) fn download_vtmpack_entry(
             ))
         }
     }
+}
+
+fn select_vtmpack_modrinth_file<'a>(
+    entry: &VtmpackDownloadableEntry,
+    version: &'a modrinth::ProjectVersion,
+) -> Result<&'a modrinth::ProjectVersionFile, String> {
+    if let Some(expected_sha512) = entry.selected_file_sha512.as_deref() {
+        let expected = expected_sha512.trim();
+        if !expected.is_empty() {
+            return version
+                .files
+                .iter()
+                .find(|file| {
+                    file.hashes
+                        .get("sha512")
+                        .is_some_and(|hash| hash.eq_ignore_ascii_case(expected))
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "no Modrinth file on version {} matched recorded sha512 for {}",
+                        version.id, entry.name
+                    )
+                });
+        }
+    }
+    if let Some(expected_sha1) = entry.selected_file_sha1.as_deref() {
+        let expected = expected_sha1.trim();
+        if !expected.is_empty() {
+            return version
+                .files
+                .iter()
+                .find(|file| {
+                    file.hashes
+                        .get("sha1")
+                        .is_some_and(|hash| hash.eq_ignore_ascii_case(expected))
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "no Modrinth file on version {} matched recorded sha1 for {}",
+                        version.id, entry.name
+                    )
+                });
+        }
+    }
+
+    version
+        .files
+        .iter()
+        .find(|file| file.primary)
+        .or_else(|| version.files.first())
+        .ok_or_else(|| {
+            format!(
+                "no downloadable file found for Modrinth version {}",
+                version.id
+            )
+        })
+}
+
+fn verify_vtmpack_download_hash(
+    entry: &VtmpackDownloadableEntry,
+    destination: &Path,
+) -> Result<(), String> {
+    if entry.selected_file_sha1.is_none() && entry.selected_file_sha512.is_none() {
+        return Ok(());
+    }
+    let (sha1, sha512) = modrinth::hash_file_sha1_and_sha512_hex(destination)
+        .map_err(|err| format!("failed to hash downloaded {}: {err}", destination.display()))?;
+    if let Some(expected) = entry.selected_file_sha512.as_deref() {
+        let expected = expected.trim();
+        if !expected.is_empty() && !sha512.eq_ignore_ascii_case(expected) {
+            return Err(format!(
+                "downloaded {} did not match recorded sha512 for {}",
+                destination.display(),
+                entry.name
+            ));
+        }
+    }
+    if let Some(expected) = entry.selected_file_sha1.as_deref() {
+        let expected = expected.trim();
+        if !expected.is_empty() && !sha1.eq_ignore_ascii_case(expected) {
+            return Err(format!(
+                "downloaded {} did not match recorded sha1 for {}",
+                destination.display(),
+                entry.name
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn populate_mrpack_instance(
@@ -845,10 +920,7 @@ pub(super) fn extract_mrpack_overrides(
 }
 
 pub(super) fn count_vtmpack_payload_entries(package_path: &Path) -> Result<usize, String> {
-    let file = fs_file_open_logged(package_path)
-        .map_err(|err| format!("failed to open {}: {err}", package_path.display()))?;
-    let decoder = xz2::read::XzDecoder::new(file);
-    let mut archive = tar::Archive::new(decoder);
+    let mut archive = open_vtmpack_tar_archive(package_path)?;
     let mut count = 0usize;
     for entry in archive
         .entries()
@@ -1217,6 +1289,7 @@ mod tests {
                 url: "https://example.invalid/geckolib-neoforge.jar".to_owned(),
                 filename: "geckolib-neoforge-1.20.1-4.4.9.jar".to_owned(),
                 primary: true,
+                hashes: std::collections::HashMap::new(),
             }],
         };
 
@@ -1252,6 +1325,7 @@ mod tests {
                 url: "https://example.invalid/crop-marker-forge-1.20.4.jar".to_owned(),
                 filename: "crop-marker-forge-1.20.4-1.2.2.jar".to_owned(),
                 primary: true,
+                hashes: std::collections::HashMap::new(),
             }],
         };
 

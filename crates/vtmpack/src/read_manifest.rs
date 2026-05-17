@@ -1,7 +1,12 @@
-use std::io::Read;
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 
 use crate::{VTMPACK_EXTENSION, VtmpackManifest};
+
+const XZ_MAGIC: &[u8] = &[0xfd, b'7', b'z', b'X', b'Z', 0x00];
+const ZPAQ_MAGIC: &[u8] = &[
+    0x37, 0x6b, 0x53, 0x74, 0xa0, 0x31, 0x83, 0xd3, 0x8c, 0xb2, 0x28, 0xb0, 0xd3,
+];
 
 #[must_use]
 pub fn default_vtmpack_file_name(instance_name: &str) -> String {
@@ -34,10 +39,7 @@ pub fn enforce_vtmpack_extension(mut path: PathBuf) -> PathBuf {
 }
 
 pub fn read_vtmpack_manifest(path: &Path) -> Result<VtmpackManifest, String> {
-    let file = std::fs::File::open(path)
-        .map_err(|err| format!("failed to open {}: {err}", path.display()))?;
-    let decoder = xz2::read::XzDecoder::new(file);
-    let mut archive = tar::Archive::new(decoder);
+    let mut archive = open_vtmpack_tar_archive(path)?;
 
     for entry in archive
         .entries()
@@ -61,4 +63,88 @@ pub fn read_vtmpack_manifest(path: &Path) -> Result<VtmpackManifest, String> {
         "No manifest.toml found in Vertex pack {}",
         path.display()
     ))
+}
+
+pub fn open_vtmpack_tar_archive(path: &Path) -> Result<tar::Archive<Box<dyn Read>>, String> {
+    let bytes =
+        std::fs::read(path).map_err(|err| format!("failed to open {}: {err}", path.display()))?;
+    if bytes.starts_with(XZ_MAGIC) {
+        let decoder = xz2::read::XzDecoder::new(Cursor::new(bytes));
+        return Ok(tar::Archive::new(Box::new(decoder)));
+    }
+    if bytes.starts_with(ZPAQ_MAGIC) {
+        let mut tar_bytes = Vec::new();
+        zpaq_rs::decompress_stream(Cursor::new(bytes), &mut tar_bytes).map_err(|err| {
+            format!(
+                "failed to decompress zpaq vtmpack {}: {err}",
+                path.display()
+            )
+        })?;
+        return Ok(tar::Archive::new(Box::new(Cursor::new(tar_bytes))));
+    }
+
+    Err(format!(
+        "Unsupported Vertex pack compression in {}. Expected xz or zpaq.",
+        path.display()
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::io::Write;
+
+    use super::*;
+    use crate::{VTMPACK_MANIFEST_VERSION, VtmpackInstanceMetadata};
+
+    #[test]
+    fn reads_zpaq_vtmpack_manifest() {
+        let manifest = VtmpackManifest {
+            format: "vtmpack".to_owned(),
+            version: VTMPACK_MANIFEST_VERSION,
+            instance: VtmpackInstanceMetadata {
+                name: "ZPAQ Pack".to_owned(),
+                game_version: "1.20.1".to_owned(),
+                modloader: "Fabric".to_owned(),
+                ..VtmpackInstanceMetadata::default()
+            },
+            ..VtmpackManifest::default()
+        };
+        let manifest_bytes = toml::to_string_pretty(&manifest)
+            .expect("serialize test manifest")
+            .into_bytes();
+        let mut tar_bytes = Vec::new();
+        {
+            let mut archive = tar::Builder::new(&mut tar_bytes);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(manifest_bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            archive
+                .append_data(&mut header, "manifest.toml", manifest_bytes.as_slice())
+                .expect("append manifest");
+            archive.finish().expect("finish tar");
+        }
+
+        let path = std::env::temp_dir().join(format!(
+            "vertexlauncher-zpaq-vtmpack-test-{}.vtmpack",
+            std::process::id()
+        ));
+        let mut file = fs::File::create(path.as_path()).expect("create zpaq test pack");
+        zpaq_rs::compress_stream(
+            Cursor::new(tar_bytes),
+            &mut file,
+            "1",
+            Some("vtmpack.tar"),
+            None,
+        )
+        .expect("compress zpaq test pack");
+        file.flush().expect("flush zpaq test pack");
+
+        let parsed = read_vtmpack_manifest(path.as_path()).expect("read zpaq manifest");
+        let _ = fs::remove_file(path.as_path());
+
+        assert_eq!(parsed.format, "vtmpack");
+        assert_eq!(parsed.instance.name, "ZPAQ Pack");
+    }
 }

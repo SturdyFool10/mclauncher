@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::Deserialize;
 
 use crate::project::build_project_url;
@@ -121,6 +123,7 @@ impl ProjectVersionRecord {
                     url: file.url,
                     filename: file.filename,
                     primary: file.primary,
+                    hashes: file.hashes,
                 })
                 .collect(),
         }
@@ -153,4 +156,6 @@ pub(crate) struct ProjectVersionFileRecord {
     pub(crate) filename: String,
     #[serde(default)]
     pub(crate) primary: bool,
+    #[serde(default)]
+    pub(crate) hashes: HashMap<String, String>,
 }

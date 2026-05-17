@@ -130,6 +130,38 @@ pub(super) fn render_export_vtmpack_modal(
                     &body_style,
                 );
 
+                ui.add_space(12.0);
+                let _ = text_ui.label(
+                    ui,
+                    ("instance_export_vtmpack_compression_label", instance_id),
+                    "Compression",
+                    &style::stat_label(ui),
+                );
+                for compression_mode in [
+                    VtmpackCompressionMode::Standard,
+                    VtmpackCompressionMode::Extreme,
+                ] {
+                    let selected =
+                        state.export_vtmpack_options.compression_mode == compression_mode;
+                    if ui.radio(selected, compression_mode.label()).clicked() {
+                        state.export_vtmpack_options.compression_mode = compression_mode;
+                    }
+                }
+                let compression_help = match state.export_vtmpack_options.compression_mode {
+                    VtmpackCompressionMode::Standard => {
+                        "Uses maximum XZ compression with the normal encoder settings."
+                    }
+                    VtmpackCompressionMode::Extreme => {
+                        "Uses ZPAQ ultra compression. Exports take longer and may use more memory, but prioritize the smallest archive."
+                    }
+                };
+                let _ = text_ui.label(
+                    ui,
+                    ("instance_export_vtmpack_compression_help", instance_id),
+                    compression_help,
+                    &body_style,
+                );
+
                 ui.add_space(16.0);
                 let _ = text_ui.label(
                     ui,

@@ -1,6 +1,7 @@
 mod constants;
 mod export;
 mod read_manifest;
+mod vtmpack_compression_mode;
 mod vtmpack_downloadable_entry;
 mod vtmpack_export_options;
 mod vtmpack_export_stats;
@@ -15,8 +16,10 @@ pub use export::{
     sanitize_managed_manifest_for_export, sync_vtmpack_export_options,
 };
 pub use read_manifest::{
-    default_vtmpack_file_name, enforce_vtmpack_extension, read_vtmpack_manifest,
+    default_vtmpack_file_name, enforce_vtmpack_extension, open_vtmpack_tar_archive,
+    read_vtmpack_manifest,
 };
+pub use vtmpack_compression_mode::VtmpackCompressionMode;
 pub use vtmpack_downloadable_entry::VtmpackDownloadableEntry;
 pub use vtmpack_export_options::VtmpackExportOptions;
 pub use vtmpack_export_stats::{VtmpackExportProgress, VtmpackExportStats};

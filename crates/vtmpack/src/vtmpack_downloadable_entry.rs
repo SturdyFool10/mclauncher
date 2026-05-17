@@ -19,4 +19,8 @@ pub struct VtmpackDownloadableEntry {
     pub selected_version_id: Option<String>,
     #[serde(default)]
     pub selected_version_name: Option<String>,
+    #[serde(default)]
+    pub selected_file_sha1: Option<String>,
+    #[serde(default)]
+    pub selected_file_sha512: Option<String>,
 }

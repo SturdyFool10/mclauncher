@@ -25,6 +25,10 @@ pub struct InstalledContentProject {
     #[serde(default)]
     pub selected_version_name: Option<String>,
     #[serde(default)]
+    pub selected_file_sha1: Option<String>,
+    #[serde(default)]
+    pub selected_file_sha512: Option<String>,
+    #[serde(default)]
     pub pack_managed: bool,
     #[serde(default)]
     pub explicitly_installed: bool,

@@ -38,8 +38,8 @@ use ui_foundation::{
     secondary_button, selectable_row_button, show_dialog, tab_button, themed_text_input,
 };
 use vtmpack::{
-    VTMPACK_EXTENSION, VtmpackInstanceMetadata, VtmpackProviderMode, default_vtmpack_file_name,
-    default_vtmpack_root_entry_selected, enforce_vtmpack_extension,
+    VTMPACK_EXTENSION, VtmpackCompressionMode, VtmpackInstanceMetadata, VtmpackProviderMode,
+    default_vtmpack_file_name, default_vtmpack_root_entry_selected, enforce_vtmpack_extension,
     export_instance_as_vtmpack_with_progress, list_exportable_root_entries,
     sync_vtmpack_export_options,
 };
