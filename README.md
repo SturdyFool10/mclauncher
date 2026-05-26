@@ -21,9 +21,11 @@ If you build from source, install:
 - Cargo
 - Git
 - a working C/C++ toolchain
-- Slang binaries found from `https://shader-slang.org/tools/`
+- Slang binaries found from `https://shader-slang.org/tools/` or `https://github.com/shader-slang/slang/releases`
 
 Windows release artifacts must use the MSVC targets. `windows-gnu` is not part of the supported release matrix.
+
+Be sure to add the Slang binaries to your PATH variable, otherwise the app will not successfully compile and build.
 
 ## Native Linux Prerequisites
 

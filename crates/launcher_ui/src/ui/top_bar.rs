@@ -621,8 +621,8 @@ fn render_active_user_terminal_button(
                     };
                     let _ = text_ui.label(
                         ui,
-                        "topbar_user_active_label",
-                        if compact { "active" } else { "user active" },
+                        "topbar_player_active_label",
+                        if compact { "active" } else { "player active" },
                         &label_style,
                     );
                 },
