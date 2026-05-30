@@ -561,21 +561,21 @@ impl VertexApp {
                     self.open_instance_folder(&instance_id);
                 }
                 InstanceContextAction::CopyLaunchCommand => {
-                    let active_launch_auth = self.auth.active_launch_context().map(|context| {
-                        screens::LaunchAuthContext {
-                            account_key: context.account_key,
-                            player_name: context.player_name,
-                            player_uuid: context.player_uuid,
-                            access_token: context.access_token,
-                            xuid: context.xuid,
-                            user_type: context.user_type,
-                        }
-                    });
-                    let active_username = self.auth.display_name();
-                    if let Some(user) = screens::selected_quick_launch_user(
-                        active_username,
-                        active_launch_auth.as_ref(),
-                    ) {
+                    let quick_auth = screens::PlayerAuthContext {
+                        launch_auth: self.auth.active_launch_context().map(|c| {
+                            screens::LaunchAuthContext {
+                                account_key: c.account_key,
+                                player_name: c.player_name,
+                                player_uuid: c.player_uuid,
+                                access_token: c.access_token,
+                                xuid: c.xuid,
+                                user_type: c.user_type,
+                            }
+                        }),
+                        token_refresh_in_progress: false,
+                        account_avatars: self.auth.account_avatars_by_key(),
+                    };
+                    if let Some(user) = screens::selected_quick_launch_user(&quick_auth) {
                         let command = screens::build_quick_launch_command(
                             screens::QuickLaunchCommandMode::Pack,
                             instance_id.as_str(),
@@ -596,21 +596,21 @@ impl VertexApp {
                     }
                 }
                 InstanceContextAction::CopySteamLaunchOptions => {
-                    let active_launch_auth = self.auth.active_launch_context().map(|context| {
-                        screens::LaunchAuthContext {
-                            account_key: context.account_key,
-                            player_name: context.player_name,
-                            player_uuid: context.player_uuid,
-                            access_token: context.access_token,
-                            xuid: context.xuid,
-                            user_type: context.user_type,
-                        }
-                    });
-                    let active_username = self.auth.display_name();
-                    if let Some(user) = screens::selected_quick_launch_user(
-                        active_username,
-                        active_launch_auth.as_ref(),
-                    ) {
+                    let quick_auth = screens::PlayerAuthContext {
+                        launch_auth: self.auth.active_launch_context().map(|c| {
+                            screens::LaunchAuthContext {
+                                account_key: c.account_key,
+                                player_name: c.player_name,
+                                player_uuid: c.player_uuid,
+                                access_token: c.access_token,
+                                xuid: c.xuid,
+                                user_type: c.user_type,
+                            }
+                        }),
+                        token_refresh_in_progress: false,
+                        account_avatars: self.auth.account_avatars_by_key(),
+                    };
+                    if let Some(user) = screens::selected_quick_launch_user(&quick_auth) {
                         let options = screens::build_quick_launch_steam_options(
                             screens::QuickLaunchCommandMode::Pack,
                             instance_id.as_str(),
@@ -658,36 +658,38 @@ impl VertexApp {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
         let settings_info = app_metadata::try_settings_info().unwrap_or_default();
+        let options = screens::AvailableOptions {
+            ui_fonts: self.fonts.available_ui_fonts(),
+            ui_font_labels: self.fonts.available_ui_font_labels(),
+            emoji_fonts: self.fonts.available_emoji_fonts(),
+            emoji_font_labels: self.fonts.available_emoji_font_labels(),
+            themes: self.theme_catalog.themes(),
+            theme_labels: self.theme_catalog.theme_labels(),
+            settings_info: &settings_info,
+        };
         if !self.settings_screen_prewarmed {
-            screens::prewarm_settings(
-                ctx,
-                &mut self.text_ui,
-                &self.config,
-                self.fonts.available_ui_fonts(),
-                self.fonts.available_ui_font_labels(),
-                self.fonts.available_emoji_fonts(),
-                self.fonts.available_emoji_font_labels(),
-                self.theme_catalog.themes(),
-                self.theme_catalog.theme_labels(),
-                &settings_info,
-            );
+            screens::prewarm_settings(ctx, &mut self.text_ui, &self.config, &options);
             self.settings_screen_prewarmed = true;
         }
-        let skin_manager_opened = self.active_screen == screens::AppScreen::Skins
-            && self.last_rendered_screen != Some(screens::AppScreen::Skins);
-        let skin_manager_account_switched =
-            self.active_screen == screens::AppScreen::Skins && account_switched;
-        let active_launch_auth =
-            self.auth
-                .active_launch_context()
-                .map(|context| screens::LaunchAuthContext {
-                    account_key: context.account_key,
-                    player_name: context.player_name,
-                    player_uuid: context.player_uuid,
-                    access_token: context.access_token,
-                    xuid: context.xuid,
-                    user_type: context.user_type,
-                });
+        let skin_manager = screens::SkinManagerContext {
+            opened: self.active_screen == screens::AppScreen::Skins
+                && self.last_rendered_screen != Some(screens::AppScreen::Skins),
+            account_switched: self.active_screen == screens::AppScreen::Skins && account_switched,
+            wgpu_target_format,
+            msaa_samples: skin_preview_msaa_samples,
+        };
+        let auth = screens::PlayerAuthContext {
+            launch_auth: self.auth.active_launch_context().map(|c| screens::LaunchAuthContext {
+                account_key: c.account_key,
+                player_name: c.player_name,
+                player_uuid: c.player_uuid,
+                access_token: c.access_token,
+                xuid: c.xuid,
+                user_type: c.user_type,
+            }),
+            token_refresh_in_progress: self.auth.token_refresh_in_progress(),
+            account_avatars: self.auth.account_avatars_by_key(),
+        };
         CentralPanel::default()
             .frame(
                 egui::Frame::new()
@@ -713,29 +715,16 @@ impl VertexApp {
                         .max_rect(content_rect)
                         .layout(egui::Layout::top_down(egui::Align::Min)),
                     |ui| {
-                        let account_avatars_by_key = self.auth.account_avatars_by_key();
                         screen_output = screens::render(
                             ui,
                             self.active_screen,
-                            skin_manager_opened,
-                            skin_manager_account_switched,
+                            skin_manager,
                             self.selected_instance_id.as_deref(),
-                            self.auth.display_name(),
-                            active_launch_auth.as_ref(),
-                            self.auth.active_account_owns_minecraft(),
+                            &auth,
                             streamer_mode,
                             &mut self.config,
                             &mut self.instance_store,
-                            account_avatars_by_key,
-                            wgpu_target_format,
-                            skin_preview_msaa_samples,
-                            self.fonts.available_ui_fonts(),
-                            self.fonts.available_ui_font_labels(),
-                            self.fonts.available_emoji_fonts(),
-                            self.fonts.available_emoji_font_labels(),
-                            self.theme_catalog.themes(),
-                            self.theme_catalog.theme_labels(),
-                            &settings_info,
+                            &options,
                             &mut self.content_browser_state,
                             &mut self.discover_state,
                             &mut self.text_ui,

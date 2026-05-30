@@ -61,13 +61,7 @@ pub fn render(
     ui: &mut Ui,
     text_ui: &mut TextUi,
     config: &mut Config,
-    available_ui_fonts: &[UiFontFamily],
-    available_ui_font_labels: &[String],
-    available_emoji_fonts: &[UiEmojiFontFamily],
-    available_emoji_font_labels: &[String],
-    available_themes: &[Theme],
-    available_theme_labels: &[String],
-    settings_info: &SettingsInfo,
+    options: &super::AvailableOptions<'_>,
 ) {
     gamepad_scroll(
         egui::ScrollArea::vertical()
@@ -75,18 +69,7 @@ pub fn render(
             .auto_shrink([false, false]),
         ui,
         |ui| {
-            render_settings_contents(
-                ui,
-                text_ui,
-                config,
-                available_ui_fonts,
-                available_ui_font_labels,
-                available_emoji_fonts,
-                available_emoji_font_labels,
-                available_themes,
-                available_theme_labels,
-                settings_info,
-            );
+            render_settings_contents(ui, text_ui, config, options);
         },
     );
 }
@@ -95,13 +78,7 @@ pub fn prewarm(
     ctx: &egui::Context,
     text_ui: &mut TextUi,
     config: &Config,
-    available_ui_fonts: &[UiFontFamily],
-    available_ui_font_labels: &[String],
-    available_emoji_fonts: &[UiEmojiFontFamily],
-    available_emoji_font_labels: &[String],
-    available_themes: &[Theme],
-    available_theme_labels: &[String],
-    settings_info: &SettingsInfo,
+    options: &super::AvailableOptions<'_>,
 ) {
     let mut prewarm_config = config.clone();
     let width = ctx.content_rect().width().max(960.0);
@@ -111,18 +88,7 @@ pub fn prewarm(
         .show(ctx, |ui| {
             ui.set_width(width);
             ui.set_min_width(width);
-            render_settings_contents(
-                ui,
-                text_ui,
-                &mut prewarm_config,
-                available_ui_fonts,
-                available_ui_font_labels,
-                available_emoji_fonts,
-                available_emoji_font_labels,
-                available_themes,
-                available_theme_labels,
-                settings_info,
-            );
+            render_settings_contents(ui, text_ui, &mut prewarm_config, options);
         });
 }
 
@@ -135,14 +101,17 @@ fn render_settings_contents(
     ui: &mut Ui,
     text_ui: &mut TextUi,
     config: &mut Config,
-    available_ui_fonts: &[UiFontFamily],
-    available_ui_font_labels: &[String],
-    available_emoji_fonts: &[UiEmojiFontFamily],
-    available_emoji_font_labels: &[String],
-    available_themes: &[Theme],
-    available_theme_labels: &[String],
-    settings_info: &SettingsInfo,
+    options: &super::AvailableOptions<'_>,
 ) {
+    let super::AvailableOptions {
+        ui_fonts: available_ui_fonts,
+        ui_font_labels: available_ui_font_labels,
+        emoji_fonts: available_emoji_fonts,
+        emoji_font_labels: available_emoji_font_labels,
+        themes: available_themes,
+        theme_labels: available_theme_labels,
+        settings_info,
+    } = options;
     render_settings_section(
         ui,
         text_ui,

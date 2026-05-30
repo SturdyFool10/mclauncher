@@ -470,6 +470,70 @@ pub(super) fn request_content_delete(
     });
 }
 
+pub(super) fn request_content_toggle(
+    state: &mut InstanceScreenState,
+    kind: InstalledContentKind,
+    lookup_key: &str,
+    path: &Path,
+    currently_disabled: bool,
+) {
+    let lookup_key = lookup_key.trim();
+    if lookup_key.is_empty() || state.content_apply_in_flight {
+        return;
+    }
+
+    ensure_content_apply_channel(state);
+    let Some(tx) = state.content_apply_results_tx.as_ref().cloned() else {
+        return;
+    };
+
+    let lookup_key = lookup_key.to_owned();
+    let path = path.to_path_buf();
+    let instance_name = state.name_input.clone();
+
+    let new_path = if currently_disabled {
+        path.with_extension("")
+    } else {
+        let disabled_name = format!(
+            "{}.DISABLED",
+            path.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+        );
+        path.with_file_name(disabled_name)
+    };
+
+    // Don't set content_apply_in_flight — a rename is near-instantaneous and
+    // setting that flag would trigger the install spinner for a single frame,
+    // causing visible flicker with no useful progress indication.
+
+    let _ = tokio_runtime::spawn_detached(async move {
+        let result = std::fs::rename(&path, &new_path)
+            .map(|_| {
+                if currently_disabled {
+                    "Mod enabled.".to_owned()
+                } else {
+                    "Mod disabled.".to_owned()
+                }
+            })
+            .map_err(|err| format!("failed to rename {}: {err}", path.display()));
+
+        if let Err(err) = tx.send(ContentApplyResult {
+            kind,
+            focus_lookup_keys: vec![lookup_key],
+            refresh_all_content: false,
+            status_message: result,
+        }) {
+            tracing::error!(
+                target: CONTENT_UPDATE_LOG_TARGET,
+                instance = %instance_name,
+                error = %err,
+                "Failed to deliver mod toggle result."
+            );
+        }
+    });
+}
+
 pub(super) fn request_bulk_content_update(
     state: &mut InstanceScreenState,
     instance_root: &Path,

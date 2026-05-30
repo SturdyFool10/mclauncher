@@ -23,7 +23,7 @@ use ui_foundation::{
 use crate::{
     assets, desktop, install_activity, notification,
     screens::{
-        LaunchAuthContext, QuickLaunchCommandMode, build_quick_launch_command,
+        PlayerAuthContext, QuickLaunchCommandMode, build_quick_launch_command,
         build_quick_launch_steam_options, selected_quick_launch_user,
     },
     ui::{
@@ -234,8 +234,7 @@ pub fn render(
     text_ui: &mut TextUi,
     instances: &mut InstanceStore,
     config: &Config,
-    active_username: Option<&str>,
-    active_launch_auth: Option<&LaunchAuthContext>,
+    auth: &PlayerAuthContext<'_>,
     streamer_mode: bool,
 ) -> HomeOutput {
     let mut output = HomeOutput::default();
@@ -291,8 +290,7 @@ pub fn render(
                 text_ui,
                 instances,
                 config,
-                active_username,
-                active_launch_auth,
+                auth,
                 &mut state,
                 &mut output,
                 metrics,
@@ -303,8 +301,7 @@ pub fn render(
                 text_ui,
                 instances,
                 &state,
-                active_username,
-                active_launch_auth,
+                auth,
                 streamer_mode,
                 &mut output,
                 &mut requested_rescan,
@@ -410,8 +407,7 @@ fn render_instance_usage(
     text_ui: &mut TextUi,
     instances: &InstanceStore,
     config: &Config,
-    active_username: Option<&str>,
-    active_launch_auth: Option<&LaunchAuthContext>,
+    auth: &PlayerAuthContext<'_>,
     state: &mut HomeState,
     output: &mut HomeOutput,
     metrics: HomeUiMetrics,
@@ -518,7 +514,7 @@ fn render_instance_usage(
                     if install_activity::is_instance_installing(instance.id.as_str()) {
                         output.selected_instance_id = Some(instance.id.clone());
                         output.requested_screen = Some(AppScreen::Library);
-                    } else {
+                    } else if !auth.token_refresh_in_progress {
                         queue_launch_intent(
                             ui.ctx(),
                             PendingLaunchIntent {
@@ -562,16 +558,14 @@ fn render_instance_usage(
                             copy_instance_launch_command(
                                 ui.ctx(),
                                 instance.id.as_str(),
-                                active_username,
-                                active_launch_auth,
+                                auth,
                             );
                         }
                         InstanceContextAction::CopySteamLaunchOptions => {
                             copy_instance_steam_launch_options(
                                 ui.ctx(),
                                 instance.id.as_str(),
-                                active_username,
-                                active_launch_auth,
+                                auth,
                             );
                         }
                         InstanceContextAction::Delete => {
@@ -590,8 +584,7 @@ fn render_activity_feed(
     text_ui: &mut TextUi,
     instances: &mut InstanceStore,
     state: &HomeState,
-    active_username: Option<&str>,
-    active_launch_auth: Option<&LaunchAuthContext>,
+    auth: &PlayerAuthContext<'_>,
     streamer_mode: bool,
     output: &mut HomeOutput,
     requested_rescan: &mut bool,
@@ -679,8 +672,7 @@ fn render_activity_feed(
                             instances,
                             output,
                             requested_rescan,
-                            active_username,
-                            active_launch_auth,
+                            auth,
                             metrics,
                         ),
                         HomeEntryRef::Server(server) => render_server_row(
@@ -696,8 +688,7 @@ fn render_activity_feed(
                             instances,
                             output,
                             requested_rescan,
-                            active_username,
-                            active_launch_auth,
+                            auth,
                             metrics,
                         ),
                     }
@@ -736,8 +727,7 @@ fn render_activity_feed(
                             instances,
                             output,
                             requested_rescan,
-                            active_username,
-                            active_launch_auth,
+                            auth,
                             metrics,
                         );
                     }
@@ -755,8 +745,7 @@ fn render_activity_feed(
                             instances,
                             output,
                             requested_rescan,
-                            active_username,
-                            active_launch_auth,
+                            auth,
                             metrics,
                         );
                     }
@@ -775,8 +764,7 @@ fn render_world_row(
     instances: &mut InstanceStore,
     output: &mut HomeOutput,
     requested_rescan: &mut bool,
-    active_username: Option<&str>,
-    active_launch_auth: Option<&LaunchAuthContext>,
+    auth: &PlayerAuthContext<'_>,
     metrics: HomeUiMetrics,
 ) {
     let name_label_options = activity_entry_name_label_options(ui);
@@ -853,7 +841,7 @@ fn render_world_row(
         *requested_rescan = true;
         return;
     }
-    if row_response.clicked() {
+    if row_response.clicked() && !auth.token_refresh_in_progress {
         queue_launch_intent(
             ui.ctx(),
             PendingLaunchIntent {
@@ -894,10 +882,10 @@ fn render_world_row(
     }
     match context_menu::take_invocation(ui.ctx(), context_id).as_deref() {
         Some("copy_world_launch_command") => {
-            copy_world_launch_command(ui.ctx(), world, active_username, active_launch_auth);
+            copy_world_launch_command(ui.ctx(), world, auth);
         }
         Some("copy_world_steam_launch_options") => {
-            copy_world_steam_launch_options(ui.ctx(), world, active_username, active_launch_auth);
+            copy_world_steam_launch_options(ui.ctx(), world, auth);
         }
         _ => {}
     }
@@ -949,8 +937,7 @@ fn render_server_row(
     instances: &mut InstanceStore,
     output: &mut HomeOutput,
     requested_rescan: &mut bool,
-    active_username: Option<&str>,
-    active_launch_auth: Option<&LaunchAuthContext>,
+    auth: &PlayerAuthContext<'_>,
     metrics: HomeUiMetrics,
 ) {
     let server_meta_full = server_meta_line(server, ping, now_ms, streamer_mode);
@@ -1031,7 +1018,7 @@ fn render_server_row(
         *requested_rescan = true;
         return;
     }
-    if row_response.clicked() {
+    if row_response.clicked() && !auth.token_refresh_in_progress {
         queue_launch_intent(
             ui.ctx(),
             PendingLaunchIntent {
@@ -1072,10 +1059,10 @@ fn render_server_row(
     }
     match context_menu::take_invocation(ui.ctx(), context_id).as_deref() {
         Some("copy_server_launch_command") => {
-            copy_server_launch_command(ui.ctx(), server, active_username, active_launch_auth);
+            copy_server_launch_command(ui.ctx(), server, auth);
         }
         Some("copy_server_steam_launch_options") => {
-            copy_server_steam_launch_options(ui.ctx(), server, active_username, active_launch_auth);
+            copy_server_steam_launch_options(ui.ctx(), server, auth);
         }
         _ => {}
     }
@@ -1116,10 +1103,9 @@ fn activity_entry_label_height(ui: &Ui, text_ui: &mut TextUi, label_options: &La
 fn copy_instance_launch_command(
     ctx: &egui::Context,
     instance_id: &str,
-    active_username: Option<&str>,
-    active_launch_auth: Option<&LaunchAuthContext>,
+    auth: &PlayerAuthContext<'_>,
 ) {
-    let Some(user) = selected_quick_launch_user(active_username, active_launch_auth) else {
+    let Some(user) = selected_quick_launch_user(auth) else {
         notification::warn!(
             "home/quick_launch",
             "Sign in before copying an instance command line."
@@ -1143,10 +1129,9 @@ fn copy_instance_launch_command(
 fn copy_instance_steam_launch_options(
     ctx: &egui::Context,
     instance_id: &str,
-    active_username: Option<&str>,
-    active_launch_auth: Option<&LaunchAuthContext>,
+    auth: &PlayerAuthContext<'_>,
 ) {
-    let Some(user) = selected_quick_launch_user(active_username, active_launch_auth) else {
+    let Some(user) = selected_quick_launch_user(auth) else {
         notification::warn!(
             "home/quick_launch",
             "Sign in before copying Steam launch options."
@@ -1170,10 +1155,9 @@ fn copy_instance_steam_launch_options(
 fn copy_world_launch_command(
     ctx: &egui::Context,
     world: &WorldEntry,
-    active_username: Option<&str>,
-    active_launch_auth: Option<&LaunchAuthContext>,
+    auth: &PlayerAuthContext<'_>,
 ) {
-    let Some(user) = selected_quick_launch_user(active_username, active_launch_auth) else {
+    let Some(user) = selected_quick_launch_user(auth) else {
         notification::warn!(
             "home/quick_launch",
             "Sign in before copying a world command line."
@@ -1197,10 +1181,9 @@ fn copy_world_launch_command(
 fn copy_world_steam_launch_options(
     ctx: &egui::Context,
     world: &WorldEntry,
-    active_username: Option<&str>,
-    active_launch_auth: Option<&LaunchAuthContext>,
+    auth: &PlayerAuthContext<'_>,
 ) {
-    let Some(user) = selected_quick_launch_user(active_username, active_launch_auth) else {
+    let Some(user) = selected_quick_launch_user(auth) else {
         notification::warn!(
             "home/quick_launch",
             "Sign in before copying Steam launch options."
@@ -1224,10 +1207,9 @@ fn copy_world_steam_launch_options(
 fn copy_server_launch_command(
     ctx: &egui::Context,
     server: &ServerEntry,
-    active_username: Option<&str>,
-    active_launch_auth: Option<&LaunchAuthContext>,
+    auth: &PlayerAuthContext<'_>,
 ) {
-    let Some(user) = selected_quick_launch_user(active_username, active_launch_auth) else {
+    let Some(user) = selected_quick_launch_user(auth) else {
         notification::warn!(
             "home/quick_launch",
             "Sign in before copying a server command line."
@@ -1251,10 +1233,9 @@ fn copy_server_launch_command(
 fn copy_server_steam_launch_options(
     ctx: &egui::Context,
     server: &ServerEntry,
-    active_username: Option<&str>,
-    active_launch_auth: Option<&LaunchAuthContext>,
+    auth: &PlayerAuthContext<'_>,
 ) {
-    let Some(user) = selected_quick_launch_user(active_username, active_launch_auth) else {
+    let Some(user) = selected_quick_launch_user(auth) else {
         notification::warn!(
             "home/quick_launch",
             "Sign in before copying Steam launch options."

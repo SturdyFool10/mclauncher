@@ -47,7 +47,7 @@ use library_runtime::{
 };
 
 use super::{
-    AppScreen, LaunchAuthContext, QuickLaunchCommandMode, build_quick_launch_command,
+    AppScreen, PlayerAuthContext, QuickLaunchCommandMode, build_quick_launch_command,
     build_quick_launch_steam_options, peek_launch_intent, selected_quick_launch_user,
 };
 use crate::ui::instance_context_menu::{self, InstanceContextAction};
@@ -104,14 +104,11 @@ pub fn render(
     ui: &mut Ui,
     text_ui: &mut TextUi,
     selected_instance_id: Option<&str>,
-    active_username: Option<&str>,
-    active_launch_auth: Option<&LaunchAuthContext>,
-    active_account_owns_minecraft: bool,
+    auth: &PlayerAuthContext<'_>,
     _streamer_mode: bool,
     instances: &mut InstanceStore,
     installations_root: &Path,
     config: &mut Config,
-    account_avatars_by_key: &HashMap<String, Vec<u8>>,
 ) -> LibraryOutput {
     let mut output = LibraryOutput::default();
     let state_id = library_runtime_state_id();
@@ -145,26 +142,20 @@ pub fn render(
 
     let tiles_height = ui.available_height().max(1.0);
     let launch_identity = LibraryLaunchIdentity {
-        account: active_launch_auth
-            .map(|auth| auth.account_key.clone())
-            .or_else(|| {
-                active_username
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_owned)
-            }),
-        display_name: active_launch_auth
-            .map(|auth| auth.player_name.clone())
-            .or_else(|| {
-                active_username
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_owned)
-            }),
-        player_uuid: active_launch_auth.map(|auth| auth.player_uuid.clone()),
-        access_token: active_launch_auth.and_then(|auth| auth.access_token.clone()),
-        xuid: active_launch_auth.and_then(|auth| auth.xuid.clone()),
-        user_type: active_launch_auth.map(|auth| auth.user_type.clone()),
+        account: auth
+            .launch_auth
+            .as_ref()
+            .map(|a| a.account_key.clone())
+            .or_else(|| auth.display_name().map(str::to_owned)),
+        display_name: auth
+            .launch_auth
+            .as_ref()
+            .map(|a| a.player_name.clone())
+            .or_else(|| auth.display_name().map(str::to_owned)),
+        player_uuid: auth.launch_auth.as_ref().map(|a| a.player_uuid.clone()),
+        access_token: auth.launch_auth.as_ref().and_then(|a| a.access_token.clone()),
+        xuid: auth.launch_auth.as_ref().and_then(|a| a.xuid.clone()),
+        user_type: auth.launch_auth.as_ref().map(|a| a.user_type.clone()),
     };
     egui::ScrollArea::both()
         .id_salt("library_instance_tiles_scroll")
@@ -194,7 +185,7 @@ pub fn render(
                         };
                         let running_avatar = running_account_key
                             .as_deref()
-                            .and_then(|key| account_avatars_by_key.get(key))
+                            .and_then(|key| auth.account_avatars.get(key))
                             .map(Vec::as_slice);
                         let instance_root_key = normalize_path_key(instance_root.as_path());
                         let account_running_root = launch_identity
@@ -206,9 +197,12 @@ pub fn render(
                                 running_root != instance_root_key.as_str()
                             });
                         let launch_disabled_for_missing_ownership =
-                            !runtime_running_for_active_account && !active_account_owns_minecraft;
-                        let launch_disabled =
-                            launch_disabled_for_account || launch_disabled_for_missing_ownership;
+                            !runtime_running_for_active_account && !auth.owns_minecraft();
+                        let launch_disabled_for_token_refresh =
+                            !runtime_running_for_active_account && auth.token_refresh_in_progress;
+                        let launch_disabled = launch_disabled_for_account
+                            || launch_disabled_for_missing_ownership
+                            || launch_disabled_for_token_refresh;
                         let launch_in_flight = state
                             .runtime
                             .pending_launches
@@ -229,6 +223,7 @@ pub fn render(
                             install_in_flight,
                             launch_disabled_for_account,
                             launch_disabled_for_missing_ownership,
+                            launch_disabled_for_token_refresh,
                             running_avatar,
                             delete_disabled,
                             selected_instance_id == Some(instance.id.as_str()),
@@ -300,16 +295,14 @@ pub fn render(
                                 copy_instance_launch_command(
                                     ui.ctx(),
                                     instance.id.as_str(),
-                                    active_username,
-                                    active_launch_auth,
+                                    auth,
                                 );
                             }
                             RuntimeAction::CopySteamOptionsRequested => {
                                 copy_instance_steam_launch_options(
                                     ui.ctx(),
                                     instance.id.as_str(),
-                                    active_username,
-                                    active_launch_auth,
+                                    auth,
                                 );
                             }
                             RuntimeAction::OpenInstanceRequested => {
@@ -340,6 +333,9 @@ pub fn render(
                                             .to_owned()
                                     } else if launch_disabled_for_missing_ownership {
                                         "Sign in with an account that owns Minecraft to launch."
+                                            .to_owned()
+                                    } else if launch_disabled_for_token_refresh {
+                                        "Waiting for account token refresh to complete."
                                             .to_owned()
                                     } else {
                                         "Launch is currently unavailable.".to_owned()
@@ -388,6 +384,7 @@ fn render_instance_tile(
     install_in_flight: bool,
     launch_disabled_for_account: bool,
     launch_disabled_for_missing_ownership: bool,
+    launch_disabled_for_token_refresh: bool,
     running_avatar_png: Option<&[u8]>,
     delete_disabled: bool,
     _selected: bool,
@@ -528,6 +525,14 @@ fn render_instance_tile(
                         ui,
                         ("library_instance_account_ownership", instance.id.as_str()),
                         "Sign in with an account that owns Minecraft to launch.",
+                        &muted_style,
+                    );
+                }
+                if launch_disabled_for_token_refresh {
+                    let _ = text_ui.label(
+                        ui,
+                        ("library_instance_token_refresh", instance.id.as_str()),
+                        "Waiting for account token refresh...",
                         &muted_style,
                     );
                 }
@@ -1008,10 +1013,9 @@ fn apply_color_to_svg(svg_bytes: &[u8], color: egui::Color32) -> Vec<u8> {
 fn copy_instance_launch_command(
     ctx: &egui::Context,
     instance_id: &str,
-    active_username: Option<&str>,
-    active_launch_auth: Option<&LaunchAuthContext>,
+    auth: &PlayerAuthContext<'_>,
 ) {
-    let Some(user) = selected_quick_launch_user(active_username, active_launch_auth) else {
+    let Some(user) = selected_quick_launch_user(auth) else {
         notification::warn!(
             "library/quick_launch",
             "Sign in before copying an instance command line."
@@ -1035,10 +1039,9 @@ fn copy_instance_launch_command(
 fn copy_instance_steam_launch_options(
     ctx: &egui::Context,
     instance_id: &str,
-    active_username: Option<&str>,
-    active_launch_auth: Option<&LaunchAuthContext>,
+    auth: &PlayerAuthContext<'_>,
 ) {
-    let Some(user) = selected_quick_launch_user(active_username, active_launch_auth) else {
+    let Some(user) = selected_quick_launch_user(auth) else {
         notification::warn!(
             "library/quick_launch",
             "Sign in before copying Steam launch options."

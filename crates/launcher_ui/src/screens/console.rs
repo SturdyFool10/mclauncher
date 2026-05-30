@@ -1,11 +1,16 @@
 use std::{
+    borrow::Cow,
     collections::HashMap,
     hash::{DefaultHasher, Hash, Hasher},
     sync::{Arc, Mutex},
 };
 
+use ansi_escapers::{
+    interpreter::{AnsiSpan, parse_ansi_annotated},
+    types::{Color as AnsiColor, SgrAttribute},
+};
 use egui::{
-    CornerRadius, FontId, Margin, Ui, pos2,
+    Color32, CornerRadius, FontId, Margin, Stroke, Ui, pos2,
     text::{LayoutJob, TextFormat},
     vec2,
 };
@@ -239,6 +244,121 @@ fn slice_log_chars(text: &str, start: usize, end: usize) -> &str {
     &text[start_byte..end_byte]
 }
 
+/// Returns the cleaned (ANSI-stripped) text for a line, or the original if it
+/// contains no escape sequences. Avoids allocation when no ANSI is present.
+fn strip_ansi(line: &str) -> Cow<'_, str> {
+    if line.contains('\x1b') {
+        Cow::Owned(parse_ansi_annotated(line).text)
+    } else {
+        Cow::Borrowed(line)
+    }
+}
+
+/// Map a standard ANSI `Color` to an egui `Color32` using the xterm default
+/// palette for the 16 named colors.
+fn ansi_color_to_egui(color: &AnsiColor) -> Color32 {
+    match color {
+        AnsiColor::Black => Color32::from_rgb(0x4C, 0x4C, 0x4C),
+        AnsiColor::Red => Color32::from_rgb(0xC5, 0x0F, 0x1F),
+        AnsiColor::Green => Color32::from_rgb(0x13, 0xA1, 0x0E),
+        AnsiColor::Yellow => Color32::from_rgb(0xC1, 0x9C, 0x00),
+        AnsiColor::Blue => Color32::from_rgb(0x00, 0x37, 0xDA),
+        AnsiColor::Magenta => Color32::from_rgb(0x88, 0x17, 0x98),
+        AnsiColor::Cyan => Color32::from_rgb(0x3A, 0x96, 0xDD),
+        AnsiColor::White => Color32::from_rgb(0xCC, 0xCC, 0xCC),
+        AnsiColor::BrightBlack => Color32::from_rgb(0x76, 0x76, 0x76),
+        AnsiColor::BrightRed => Color32::from_rgb(0xE7, 0x48, 0x56),
+        AnsiColor::BrightGreen => Color32::from_rgb(0x16, 0xC6, 0x0C),
+        AnsiColor::BrightYellow => Color32::from_rgb(0xF9, 0xF1, 0xA5),
+        AnsiColor::BrightBlue => Color32::from_rgb(0x3B, 0x78, 0xFF),
+        AnsiColor::BrightMagenta => Color32::from_rgb(0xB4, 0x00, 0x9E),
+        AnsiColor::BrightCyan => Color32::from_rgb(0x61, 0xD6, 0xD6),
+        AnsiColor::BrightWhite => Color32::from_rgb(0xF2, 0xF2, 0xF2),
+        AnsiColor::AnsiValue(idx) => ansi_256_to_egui(*idx),
+        AnsiColor::Rgb24 { r, g, b } => Color32::from_rgb(*r, *g, *b),
+    }
+}
+
+/// Convert an xterm 256-color index to `Color32`.
+fn ansi_256_to_egui(idx: u8) -> Color32 {
+    match idx {
+        0..=15 => ansi_color_to_egui(&match idx {
+            0 => AnsiColor::Black,
+            1 => AnsiColor::Red,
+            2 => AnsiColor::Green,
+            3 => AnsiColor::Yellow,
+            4 => AnsiColor::Blue,
+            5 => AnsiColor::Magenta,
+            6 => AnsiColor::Cyan,
+            7 => AnsiColor::White,
+            8 => AnsiColor::BrightBlack,
+            9 => AnsiColor::BrightRed,
+            10 => AnsiColor::BrightGreen,
+            11 => AnsiColor::BrightYellow,
+            12 => AnsiColor::BrightBlue,
+            13 => AnsiColor::BrightMagenta,
+            14 => AnsiColor::BrightCyan,
+            _ => AnsiColor::BrightWhite,
+        }),
+        16..=231 => {
+            let v = idx as u32 - 16;
+            let b = v % 6;
+            let g = (v / 6) % 6;
+            let r = v / 36;
+            let chan = |c: u32| if c == 0 { 0u8 } else { (55 + c * 40) as u8 };
+            Color32::from_rgb(chan(r), chan(g), chan(b))
+        }
+        232..=255 => {
+            let gray = 8 + (idx as u32 - 232) * 10;
+            let g = gray.min(255) as u8;
+            Color32::from_rgb(g, g, g)
+        }
+    }
+}
+
+/// Derive the effective `TextFormat` for an ANSI span, falling back to the
+/// line-level `default_color` for any attribute not set by the span's codes.
+fn ansi_span_text_format(
+    codes: &[SgrAttribute],
+    default_color: Color32,
+    font_id: FontId,
+    default_italic: bool,
+) -> TextFormat {
+    let mut color = default_color;
+    let mut background = Color32::TRANSPARENT;
+    let mut italic = default_italic;
+    let mut underline = Stroke::NONE;
+    let mut strikethrough = Stroke::NONE;
+
+    for code in codes {
+        match code {
+            SgrAttribute::Foreground(c) => color = ansi_color_to_egui(c),
+            SgrAttribute::Background(c) => background = ansi_color_to_egui(c),
+            SgrAttribute::Italic => italic = true,
+            SgrAttribute::Underline => underline = Stroke::new(1.0, color),
+            SgrAttribute::CrossedOut => strikethrough = Stroke::new(1.0, color),
+            SgrAttribute::Reset => {
+                color = default_color;
+                background = Color32::TRANSPARENT;
+                italic = default_italic;
+                underline = Stroke::NONE;
+                strikethrough = Stroke::NONE;
+            }
+            _ => {}
+        }
+    }
+
+    TextFormat {
+        font_id,
+        color,
+        background,
+        italics: italic,
+        underline,
+        strikethrough,
+        ..Default::default()
+    }
+}
+
 fn selected_log_text(lines: &[String], selection: &LogSelectionState) -> Option<String> {
     let (start, end) = selection.normalized()?;
     if start == end {
@@ -248,8 +368,9 @@ fn selected_log_text(lines: &[String], selection: &LogSelectionState) -> Option<
     let mut out = String::new();
 
     for line_index in start.line..=end.line {
-        let line = lines.get(line_index)?;
-        let line_chars = log_char_count(line);
+        let raw = lines.get(line_index)?;
+        let line = strip_ansi(raw);
+        let line_chars = log_char_count(&line);
 
         let from = if line_index == start.line {
             start.char_index.min(line_chars)
@@ -264,7 +385,7 @@ fn selected_log_text(lines: &[String], selection: &LogSelectionState) -> Option<
         };
 
         if to > from {
-            out.push_str(slice_log_chars(line, from, to));
+            out.push_str(slice_log_chars(&line, from, to));
         }
 
         if line_index != end.line {
@@ -279,26 +400,100 @@ fn selection_fill_color(ui: &Ui) -> egui::Color32 {
     ui.visuals().selection.bg_fill.linear_multiply(0.55)
 }
 
-fn layout_console_line_galley(ui: &Ui, line: &str, options: &LabelOptions) -> Arc<egui::Galley> {
+/// Build a galley for one console line.
+///
+/// Returns `(galley, display_char_count)` where `display_char_count` is the
+/// character count of the text that was actually laid out (which may be shorter
+/// than `line` when ANSI escape codes are stripped).
+fn layout_console_line_galley(
+    ui: &Ui,
+    line: &str,
+    options: &LabelOptions,
+) -> (Arc<egui::Galley>, usize) {
+    let font_id = FontId {
+        size: options.font_size,
+        family: if options.monospace {
+            egui::FontFamily::Monospace
+        } else {
+            egui::FontFamily::Proportional
+        },
+    };
+
+    if line.contains('\x1b') {
+        let parsed = parse_ansi_annotated(line);
+        let display_text = &parsed.text;
+        let galley = layout_ansi_galley(ui, display_text, &parsed.spans, options, font_id);
+        let char_count = display_text.chars().count();
+        return (galley, char_count);
+    }
+
+    // No ANSI — single uniform span, same as before.
     let mut job = LayoutJob::default();
     job.wrap.max_width = f32::INFINITY;
     job.append(
         line,
         0.0,
         TextFormat {
-            font_id: FontId {
-                size: options.font_size,
-                family: if options.monospace {
-                    egui::FontFamily::Monospace
-                } else {
-                    egui::FontFamily::Proportional
-                },
-            },
+            font_id,
             color: options.color,
             italics: options.italic,
             ..Default::default()
         },
     );
+    (ui.painter().layout_job(job), line.chars().count())
+}
+
+/// Build a multi-span galley from pre-parsed ANSI data.
+fn layout_ansi_galley(
+    ui: &Ui,
+    display_text: &str,
+    spans: &[AnsiSpan],
+    options: &LabelOptions,
+    font_id: FontId,
+) -> Arc<egui::Galley> {
+    let mut job = LayoutJob::default();
+    job.wrap.max_width = f32::INFINITY;
+
+    let default_format = || TextFormat {
+        font_id: font_id.clone(),
+        color: options.color,
+        italics: options.italic,
+        ..Default::default()
+    };
+
+    if spans.is_empty() {
+        job.append(display_text, 0.0, default_format());
+        return ui.painter().layout_job(job);
+    }
+
+    let mut cursor: usize = 0;
+    for span in spans {
+        let start = span.start.min(display_text.len());
+        let end = span.end.min(display_text.len());
+
+        // Any gap before this span gets the default line color.
+        if start > cursor {
+            job.append(&display_text[cursor..start], 0.0, default_format());
+        }
+
+        if end > start {
+            let fmt = ansi_span_text_format(
+                &span.codes,
+                options.color,
+                font_id.clone(),
+                options.italic,
+            );
+            job.append(&display_text[start..end], 0.0, fmt);
+        }
+
+        cursor = end;
+    }
+
+    // Trailing text after the last span.
+    if cursor < display_text.len() {
+        job.append(&display_text[cursor..], 0.0, default_format());
+    }
+
     ui.painter().layout_job(job)
 }
 
@@ -359,8 +554,7 @@ fn cached_console_line_layout(
         }
     }
 
-    let galley = layout_console_line_galley(ui, line, options);
-    let line_len_chars = log_char_count(line);
+    let (galley, line_len_chars) = layout_console_line_galley(ui, line, options);
     let mut cache_guard = cache.lock().expect("console line layout cache poisoned");
     cache_guard.entries.insert(
         cache_id,
@@ -501,7 +695,8 @@ fn paint_log_selection_for_line(
         return;
     }
 
-    let line_chars = log_char_count(line_text);
+    let display = strip_ansi(line_text);
+    let line_chars = log_char_count(&display);
     let from = if line_index == start.line {
         start.char_index.min(line_chars)
     } else {

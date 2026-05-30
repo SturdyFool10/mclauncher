@@ -141,8 +141,18 @@ impl InstalledContentResolver {
                 .and_then(|value| value.to_str())
                 .map(str::to_ascii_lowercase)
                 .unwrap_or_default();
+
+            // A mod jar renamed with a .DISABLED suffix is excluded from modloader scans but
+            // still surfaced here so the user can re-enable it from the UI.
+            let disabled = kind == InstalledContentKind::Mods
+                && file_type.is_file()
+                && extension == "disabled"
+                && file_name.to_ascii_lowercase().ends_with(".jar.disabled");
+
             let allowed = match kind {
-                InstalledContentKind::Mods => file_type.is_file() && extension == "jar",
+                InstalledContentKind::Mods => {
+                    file_type.is_file() && (extension == "jar" || disabled)
+                }
                 InstalledContentKind::ResourcePacks
                 | InstalledContentKind::ShaderPacks
                 | InstalledContentKind::DataPacks => file_type.is_dir() || extension == "zip",
@@ -151,9 +161,26 @@ impl InstalledContentResolver {
                 continue;
             }
 
+            // For disabled mods, derive lookups against the underlying .jar name so they match
+            // metadata that was cached while the mod was enabled.
+            let lookup_path = if disabled {
+                path.with_extension("")
+            } else {
+                path.clone()
+            };
+            let lookup_file_name = if disabled {
+                lookup_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| file_name.clone())
+            } else {
+                file_name.clone()
+            };
+
             let relative_path_key = normalize_installed_content_path_key(
-                path.strip_prefix(instance_root)
-                    .unwrap_or(path.as_path())
+                lookup_path
+                    .strip_prefix(instance_root)
+                    .unwrap_or(lookup_path.as_path())
                     .to_string_lossy()
                     .as_ref(),
             );
@@ -162,12 +189,16 @@ impl InstalledContentResolver {
                 .as_ref()
                 .map(|identity| identity.name.clone())
                 .unwrap_or_else(|| {
-                    derive_installed_lookup_query(path.as_path(), file_name.as_str())
+                    derive_installed_lookup_query(
+                        lookup_path.as_path(),
+                        lookup_file_name.as_str(),
+                    )
                 });
             let (fallback_lookup_query, fallback_lookup_key) = if managed_identity.is_some() {
                 (None, None)
             } else {
-                let fallback_query = derive_raw_lookup_query(path.as_path(), file_name.as_str());
+                let fallback_query =
+                    derive_raw_lookup_query(lookup_path.as_path(), lookup_file_name.as_str());
                 let fallback_key_suffix = normalize_lookup_key(fallback_query.as_str());
                 if fallback_key_suffix.is_empty()
                     || fallback_key_suffix == normalize_lookup_key(lookup_query.as_str())
@@ -193,6 +224,7 @@ impl InstalledContentResolver {
                 fallback_lookup_query,
                 fallback_lookup_key,
                 managed_identity,
+                disabled,
             });
         }
 

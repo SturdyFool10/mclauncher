@@ -13,7 +13,7 @@ mod content_updates;
 use self::content_actions::{
     poll_content_apply_results, refresh_installed_content_state,
     render_joined_content_browser_controls, request_bulk_content_update, request_content_delete,
-    request_content_update, request_local_content_import,
+    request_content_toggle, request_content_update, request_local_content_import,
 };
 use self::content_updates::{
     bulk_update_button_label, bulk_update_button_tooltip, installed_content_lookup_repaint_delay,
@@ -307,6 +307,7 @@ pub(super) fn render_installed_content_section(
 
     let mut pending_delete: Option<(PathBuf, String)> = None;
     let mut pending_update: Option<(String, String, PathBuf)> = None;
+    let mut pending_toggle: Option<(PathBuf, String, bool)> = None;
     let scroll_height = ui.available_height().max(180.0);
     egui::ScrollArea::vertical()
         .id_salt((
@@ -326,18 +327,29 @@ pub(super) fn render_installed_content_section(
                     .content_metadata_cache
                     .get(&entry.lookup_key)
                     .and_then(|meta| meta.as_ref());
+                // For disabled mods the disk name ends with .DISABLED; strip it for display.
+                let effective_file_name = if entry.disabled {
+                    entry
+                        .file_path
+                        .with_extension("")
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| entry.file_name.clone())
+                } else {
+                    entry.file_name.clone()
+                };
                 let display_name = metadata
                     .map(|value| value.entry.name.clone())
-                    .unwrap_or_else(|| entry.file_name.clone());
+                    .unwrap_or_else(|| effective_file_name.clone());
                 let description = metadata
                     .map(|value| {
                         if value.entry.summary.trim().is_empty() {
-                            entry.file_name.clone()
+                            effective_file_name.clone()
                         } else {
                             value.entry.summary.clone()
                         }
                     })
-                    .unwrap_or_else(|| entry.file_name.clone());
+                    .unwrap_or_else(|| effective_file_name.clone());
                 let platform_label = metadata
                     .map(|value| value.entry.source.label().to_owned())
                     .unwrap_or_else(|| "Unknown".to_owned());
@@ -379,12 +391,16 @@ pub(super) fn render_installed_content_section(
                                 delete_button_icon_svg.as_slice(),
                                 delete_icon_color,
                                 warning_icon_svg.as_slice(),
+                                state.selected_content_tab == InstalledContentKind::Mods,
                             )
                         },
                     )
                     .inner;
 
-                if rendered.delete_clicked {
+                if rendered.toggle_clicked {
+                    pending_toggle =
+                        Some((entry.file_path.clone(), entry.lookup_key.clone(), entry.disabled));
+                } else if rendered.delete_clicked {
                     pending_delete = Some((entry.file_path.clone(), entry.lookup_key.clone()));
                 } else if rendered.update_clicked {
                     if let Some(version_id) = update_version_id {
@@ -426,6 +442,16 @@ pub(super) fn render_installed_content_section(
             state.selected_content_tab,
             lookup_key.as_str(),
             path.as_path(),
+        );
+    }
+
+    if let Some((path, lookup_key, currently_disabled)) = pending_toggle {
+        request_content_toggle(
+            state,
+            state.selected_content_tab,
+            lookup_key.as_str(),
+            path.as_path(),
+            currently_disabled,
         );
     }
 
@@ -589,6 +615,7 @@ fn render_installed_content_entry(
     delete_button_icon_svg: &[u8],
     delete_icon_color: egui::Color32,
     warning_icon_svg: &[u8],
+    is_mod_tab: bool,
 ) -> InstalledEntryRenderResult {
     const INSTALLED_TILE_GAP: f32 = 8.0;
     const INSTALLED_TILE_THUMBNAIL_FRAME_PADDING: f32 = 8.0;
@@ -598,7 +625,7 @@ fn render_installed_content_entry(
     let tile_width = (available_width - (style::SPACE_XS * 2.0)).max(1.0);
     let side_padding = ((available_width - tile_width) * 0.5).max(0.0);
 
-    let (delete_clicked, update_clicked, open_clicked) = ui
+    let (delete_clicked, update_clicked, toggle_clicked, open_clicked) = ui
         .horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             if side_padding > 0.0 {
@@ -616,6 +643,7 @@ fn render_installed_content_entry(
 
                     let mut delete_clicked = false;
                     let mut update_clicked = false;
+                    let mut toggle_clicked = false;
                     let action_button_width = 28.0;
                     let content_width = ui.available_width().max(1.0);
                     let thumbnail_size = ((content_width - 52.0) * 0.14).clamp(32.0, 48.0);
@@ -636,6 +664,23 @@ fn render_installed_content_entry(
                             action_button_width,
                         ) {
                             delete_clicked = true;
+                        }
+
+                        if is_mod_tab {
+                            ui.add_space(INSTALLED_TILE_GAP);
+                            // Width scales with height using the same 11:7 ratio a typical
+                            // pill switch uses — both dimensions now track action_button_width
+                            // so they scale consistently with the delete button.
+                            let toggle_width = (action_button_width * 1.57).ceil();
+                            if render_mod_enable_toggle(
+                                ui,
+                                entry.lookup_key.as_str(),
+                                !entry.disabled,
+                                toggle_width,
+                                action_button_width,
+                            ) {
+                                toggle_clicked = true;
+                            }
                         }
 
                         ui.add_space(INSTALLED_TILE_GAP);
@@ -783,7 +828,7 @@ fn render_installed_content_entry(
                         );
                     });
 
-                    (delete_clicked, update_clicked)
+                    (delete_clicked, update_clicked, toggle_clicked)
                 });
 
             if side_padding > 0.0 {
@@ -793,15 +838,17 @@ fn render_installed_content_entry(
             (
                 frame_response.inner.0,
                 frame_response.inner.1,
+                frame_response.inner.2,
                 frame_response.response.clicked(),
             )
         })
         .inner;
 
     InstalledEntryRenderResult {
-        open_clicked: open_clicked && !delete_clicked && !update_clicked,
+        open_clicked: open_clicked && !delete_clicked && !update_clicked && !toggle_clicked,
         delete_clicked,
         update_clicked,
+        toggle_clicked,
     }
 }
 
@@ -872,6 +919,88 @@ fn render_installed_content_action_button(
     let _ = ui.put(icon_rect, image);
 
     response.on_hover_text(tooltip).clicked()
+}
+
+use crate::ui::color::lerp_color32_oklab;
+use crate::ui::toggle_anim::ToggleAnimState;
+
+// ── Animated toggle widget ────────────────────────────────────────────────────
+
+fn render_mod_enable_toggle(
+    ui: &mut Ui,
+    id: &str,
+    enabled: bool,
+    width: f32,
+    height: f32,
+) -> bool {
+    let size = egui::vec2(width, height);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+
+    // Load, advance, and persist animation state.
+    let anim_id = ui.make_persistent_id(("mod_toggle_anim", id));
+    let target = if enabled { 1.0f32 } else { 0.0f32 };
+    // Cap dt so a long frame doesn't teleport the knob.
+    let dt = ui.ctx().input(|i| i.stable_dt).min(0.1);
+
+    let mut anim: ToggleAnimState = ui
+        .ctx()
+        .data_mut(|d| d.get_temp::<ToggleAnimState>(anim_id))
+        .unwrap_or_else(|| ToggleAnimState::settled(target));
+
+    anim.redirect(target);
+    anim.advance(dt);
+    let pos = anim.visual_pos(); // 0.0 = off, 1.0 = on
+
+    if !anim.is_done() {
+        ui.ctx().request_repaint();
+    }
+    ui.ctx().data_mut(|d| d.insert_temp(anim_id, anim));
+
+    // Geometry
+    let track_h = (height * 0.68).max(14.0);
+    let track_rect = egui::Rect::from_center_size(
+        rect.center(),
+        egui::vec2(width - 6.0, track_h),
+    );
+    let cr = egui::CornerRadius::same((track_h * 0.5) as u8);
+    let visuals = ui.visuals();
+
+    // Track fill and stroke — interpolated in OKLab.
+    let fill = lerp_color32_oklab(visuals.widgets.inactive.bg_fill, visuals.selection.bg_fill, pos);
+    let stroke_color = lerp_color32_oklab(
+        visuals.widgets.inactive.bg_stroke.color,
+        visuals.selection.stroke.color,
+        pos,
+    );
+    let stroke_w = visuals.widgets.inactive.bg_stroke.width
+        + (visuals.selection.stroke.width - visuals.widgets.inactive.bg_stroke.width) * pos;
+
+    ui.painter().rect_filled(track_rect, cr, fill);
+    ui.painter().rect_stroke(
+        track_rect,
+        cr,
+        egui::Stroke::new(stroke_w, stroke_color),
+        egui::StrokeKind::Inside,
+    );
+
+    // Knob position — driven by the same eased pos.
+    let knob_r = (track_h * 0.33).max(4.0);
+    let margin = knob_r + 2.5;
+    let travel = track_rect.width() - margin * 2.0;
+    let knob_x = track_rect.left() + margin + travel * pos;
+    let knob_color = lerp_color32_oklab(
+        visuals.widgets.noninteractive.fg_stroke.color,
+        visuals.widgets.active.fg_stroke.color,
+        pos,
+    );
+    ui.painter()
+        .circle_filled(egui::pos2(knob_x, track_rect.center().y), knob_r, knob_color);
+
+    let tooltip = if enabled { "Disable mod" } else { "Enable mod" };
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(tooltip)
+        .clicked()
 }
 
 fn render_bulk_update_button(

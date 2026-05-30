@@ -62,6 +62,7 @@ ureq = { version = "3.3.0", features = ["json"] }
 qrcode = "0.14"
 gilrs = "0.11"
 rustc-hash = "2.1.1"
+colorlab = { git = "https://github.com/SturdyFool10/ColorLab" }
 
 # internal crates
 app_paths = { path = "crates/app_paths" }

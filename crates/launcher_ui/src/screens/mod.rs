@@ -1,4 +1,4 @@
-use std::{collections::HashMap, env};
+use std::env;
 
 use config::{Config, UiEmojiFontFamily, UiFontFamily};
 use curseforge::set_api_key_override as set_curseforge_api_key_override;
@@ -18,6 +18,8 @@ mod home;
 mod instance;
 #[path = "screens/launch_auth_context.rs"]
 mod launch_auth_context;
+#[path = "screens/player_auth_context.rs"]
+mod player_auth_context;
 mod legal;
 mod library;
 #[path = "screens/menu_presence_context.rs"]
@@ -55,6 +57,7 @@ pub use instance::purge_inactive_state as purge_inactive_instance_state;
 pub use instance::purge_screenshot_state as purge_instance_screenshot_state;
 pub use instance::set_gamepad_screenshot_viewer_input as set_instance_screenshot_viewer_gamepad_input;
 pub use launch_auth_context::LaunchAuthContext;
+pub use player_auth_context::PlayerAuthContext;
 pub use library::{
     purge_inactive_state as purge_inactive_library_state, render_global_overlays,
     request_delete_instance,
@@ -72,6 +75,31 @@ pub use skins::request_motion_focus as request_skins_motion_focus;
 pub use skins::set_gamepad_orbit_input as set_skins_gamepad_orbit_input;
 pub use skins::slim_model_button_id as skins_slim_model_button_id;
 
+/// GPU / skin-manager parameters used exclusively by the skins screen.
+/// Grouping them prevents four unrelated values from polluting every other
+/// screen's function signature.
+pub struct SkinManagerContext {
+    /// `true` on the first frame the skins screen becomes active (triggers
+    /// initial state setup inside the skin manager).
+    pub opened: bool,
+    /// `true` when the active account changed while the skins screen was open.
+    pub account_switched: bool,
+    pub wgpu_target_format: Option<wgpu::TextureFormat>,
+    pub msaa_samples: u32,
+}
+
+/// Font and theme choices the settings screen needs to populate its dropdowns.
+/// Only passed into `settings::render`; not threaded through other screens.
+pub struct AvailableOptions<'a> {
+    pub ui_fonts: &'a [UiFontFamily],
+    pub ui_font_labels: &'a [String],
+    pub emoji_fonts: &'a [UiEmojiFontFamily],
+    pub emoji_font_labels: &'a [String],
+    pub themes: &'a [Theme],
+    pub theme_labels: &'a [String],
+    pub settings_info: &'a SettingsInfo,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct PendingLaunchIntent {
     pub nonce: u64,
@@ -80,20 +108,13 @@ pub(crate) struct PendingLaunchIntent {
     pub quick_play_multiplayer: Option<String>,
 }
 
-pub fn selected_quick_launch_user(
-    active_username: Option<&str>,
-    active_launch_auth: Option<&LaunchAuthContext>,
-) -> Option<String> {
-    active_launch_auth
-        .map(|auth| auth.player_uuid.trim())
+pub fn selected_quick_launch_user(auth: &PlayerAuthContext) -> Option<String> {
+    auth.launch_auth
+        .as_ref()
+        .map(|a| a.player_uuid.trim())
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
-        .or_else(|| {
-            active_username
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned)
-        })
+        .or_else(|| auth.display_name().map(str::to_owned))
 }
 
 pub fn build_quick_launch_command(
@@ -207,25 +228,13 @@ pub fn menu_presence_context(
 pub fn render(
     ui: &mut Ui,
     screen: AppScreen,
-    skin_manager_opened: bool,
-    skin_manager_account_switched: bool,
+    skin_manager: SkinManagerContext,
     selected_instance_id: Option<&str>,
-    active_username: Option<&str>,
-    active_launch_auth: Option<&LaunchAuthContext>,
-    active_account_owns_minecraft: bool,
+    auth: &PlayerAuthContext<'_>,
     streamer_mode: bool,
     config: &mut Config,
     instances: &mut InstanceStore,
-    account_avatars_by_key: &HashMap<String, Vec<u8>>,
-    wgpu_target_format: Option<wgpu::TextureFormat>,
-    skin_preview_msaa_samples: u32,
-    available_ui_fonts: &[UiFontFamily],
-    available_ui_font_labels: &[String],
-    available_emoji_fonts: &[UiEmojiFontFamily],
-    available_emoji_font_labels: &[String],
-    available_themes: &[Theme],
-    available_theme_labels: &[String],
-    settings_info: &SettingsInfo,
+    options: &AvailableOptions<'_>,
     content_browser_state: &mut ContentBrowserState,
     discover_state: &mut DiscoverState,
     text_ui: &mut TextUi,
@@ -257,8 +266,7 @@ pub fn render(
                         text_ui,
                         instances,
                         config,
-                        active_username,
-                        active_launch_auth,
+                        auth,
                         streamer_mode,
                     );
                     ScreenOutput {
@@ -279,14 +287,11 @@ pub fn render(
                         $ui,
                         text_ui,
                         selected_instance_id,
-                        active_username,
-                        active_launch_auth,
-                        active_account_owns_minecraft,
+                        auth,
                         streamer_mode,
                         instances,
                         installations_root.as_path(),
                         config,
-                        account_avatars_by_key,
                     );
                     ScreenOutput {
                         instances_changed: false,
@@ -339,12 +344,9 @@ pub fn render(
                         $ui,
                         text_ui,
                         selected_instance_id,
-                        active_launch_auth,
-                        skin_manager_opened,
-                        skin_manager_account_switched,
+                        auth.launch_auth.as_ref(),
+                        &skin_manager,
                         streamer_mode,
-                        wgpu_target_format,
-                        skin_preview_msaa_samples,
                         config.skin_preview_aa_mode(),
                         config.skin_preview_texel_aa_mode(),
                         config.skin_preview_motion_blur_enabled(),
@@ -364,13 +366,7 @@ pub fn render(
                         $ui,
                         text_ui,
                         config,
-                        available_ui_fonts,
-                        available_ui_font_labels,
-                        available_emoji_fonts,
-                        available_emoji_font_labels,
-                        available_themes,
-                        available_theme_labels,
-                        settings_info,
+                        options,
                     );
                     ScreenOutput {
                         menu_presence_context: Some(MenuPresenceContext::Screen(
@@ -400,13 +396,10 @@ pub fn render(
                         $ui,
                         text_ui,
                         selected_instance_id,
-                        active_username,
-                        active_launch_auth,
-                        active_account_owns_minecraft,
+                        auth,
                         streamer_mode,
                         instances,
                         config,
-                        account_avatars_by_key,
                     );
                     ScreenOutput {
                         instances_changed: output.instances_changed,

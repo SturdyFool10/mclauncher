@@ -44,6 +44,8 @@ tar = "*"
 xz2 = "*"
 vtmpack.workspace = true
 vertex_3d.workspace = true
+ansi_escapers = { git = "https://github.com/SturdyFool10/ANSIEscapeRS" }
+colorlab.workspace = true
 zip = { version = "*", default-features = false, features = ["deflate"] }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]

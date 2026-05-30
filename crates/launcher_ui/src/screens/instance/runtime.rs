@@ -146,11 +146,8 @@ pub(super) fn render_runtime_row(
     game_version: &str,
     config: &Config,
     external_install_active: bool,
-    active_username: Option<&str>,
-    active_launch_auth: Option<&LaunchAuthContext>,
-    active_account_owns_minecraft: bool,
+    auth: &PlayerAuthContext<'_>,
     streamer_mode: bool,
-    account_avatars_by_key: &HashMap<String, Vec<u8>>,
 ) {
     let button_style = ButtonOptions {
         min_size: egui::vec2(120.0, 34.0),
@@ -166,26 +163,20 @@ pub(super) fn render_runtime_row(
     muted_style.color = ui.visuals().weak_text_color();
     muted_style.wrap = false;
     let instance_root_key = normalize_path_key(instance_root);
-    let launch_account = active_launch_auth
-        .map(|auth| auth.account_key.clone())
-        .or_else(|| {
-            active_username
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned)
-        });
-    let launch_display_name = active_launch_auth
-        .map(|auth| auth.player_name.clone())
-        .or_else(|| {
-            active_username
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned)
-        });
-    let launch_player_uuid = active_launch_auth.map(|auth| auth.player_uuid.clone());
-    let launch_access_token = active_launch_auth.and_then(|auth| auth.access_token.clone());
-    let launch_xuid = active_launch_auth.and_then(|auth| auth.xuid.clone());
-    let launch_user_type = active_launch_auth.map(|auth| auth.user_type.clone());
+    let launch_account = auth
+        .launch_auth
+        .as_ref()
+        .map(|a| a.account_key.clone())
+        .or_else(|| auth.display_name().map(str::to_owned));
+    let launch_display_name = auth
+        .launch_auth
+        .as_ref()
+        .map(|a| a.player_name.clone())
+        .or_else(|| auth.display_name().map(str::to_owned));
+    let launch_player_uuid = auth.launch_auth.as_ref().map(|a| a.player_uuid.clone());
+    let launch_access_token = auth.launch_auth.as_ref().and_then(|a| a.access_token.clone());
+    let launch_xuid = auth.launch_auth.as_ref().and_then(|a| a.xuid.clone());
+    let launch_user_type = auth.launch_auth.as_ref().map(|a| a.user_type.clone());
     let runtime_running_for_active_account = launch_account
         .as_deref()
         .is_some_and(|account| is_instance_running_for_account(instance_root, account));
@@ -197,8 +188,12 @@ pub(super) fn render_runtime_row(
             .as_deref()
             .is_some_and(|running_root| running_root != instance_root_key.as_str());
     let launch_disabled_for_missing_ownership =
-        !runtime_running_for_active_account && !active_account_owns_minecraft;
-    let launch_disabled = launch_disabled_for_account || launch_disabled_for_missing_ownership;
+        !runtime_running_for_active_account && !auth.owns_minecraft();
+    let launch_disabled_for_token_refresh =
+        !runtime_running_for_active_account && auth.token_refresh_in_progress;
+    let launch_disabled = launch_disabled_for_account
+        || launch_disabled_for_missing_ownership
+        || launch_disabled_for_token_refresh;
 
     let running_account_key = if runtime_running_for_active_account {
         launch_player_uuid
@@ -211,7 +206,7 @@ pub(super) fn render_runtime_row(
     };
     let running_avatar_png = running_account_key
         .as_deref()
-        .and_then(|key| account_avatars_by_key.get(key))
+        .and_then(|key| auth.account_avatars.get(key))
         .map(Vec::as_slice);
     let runtime_running = runtime_running_for_active_account;
     state.running = runtime_running;
@@ -365,6 +360,14 @@ pub(super) fn render_runtime_row(
             ui,
             ("instance_runtime_account_ownership", id),
             "Sign in with a Minecraft account that owns Minecraft to launch.",
+            &muted_style,
+        );
+    }
+    if launch_disabled_for_token_refresh {
+        let _ = text_ui.label(
+            ui,
+            ("instance_runtime_token_refresh", id),
+            "Waiting for account token refresh...",
             &muted_style,
         );
     }

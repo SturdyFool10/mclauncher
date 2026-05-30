@@ -607,13 +607,6 @@ impl AuthState {
             .map(|account| account.minecraft_profile.name.as_str())
     }
 
-    pub fn active_account_owns_minecraft(&self) -> bool {
-        self.accounts_state.active_account().is_some_and(|account| {
-            !account.minecraft_profile.id.trim().is_empty()
-                && !account.minecraft_profile.name.trim().is_empty()
-        })
-    }
-
     pub fn active_launch_context(&self) -> Option<LaunchAuthContext> {
         let account = self.accounts_state.active_account()?;
         let player_name = account.minecraft_profile.name.trim();

@@ -22,7 +22,7 @@ use instances::{
 };
 use managed_content::load_managed_content_identities;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, hash_map::DefaultHasher},
+    collections::{BTreeMap, HashSet, hash_map::DefaultHasher},
     ffi::OsStr,
     fs,
     hash::{Hash, Hasher},
@@ -46,7 +46,7 @@ use vtmpack::{
 
 use crate::app::tokio_runtime;
 use crate::desktop;
-use crate::screens::{AppScreen, LaunchAuthContext};
+use crate::screens::{AppScreen, PlayerAuthContext};
 use crate::ui::{
     components::{
         icon_button, image_textures,
@@ -305,13 +305,10 @@ pub fn render(
     ui: &mut Ui,
     text_ui: &mut TextUi,
     selected_instance_id: Option<&str>,
-    active_username: Option<&str>,
-    active_launch_auth: Option<&LaunchAuthContext>,
-    active_account_owns_minecraft: bool,
+    auth: &PlayerAuthContext<'_>,
     streamer_mode: bool,
     instances: &mut InstanceStore,
     config: &mut Config,
-    account_avatars_by_key: &HashMap<String, Vec<u8>>,
 ) -> InstanceScreenOutput {
     ui.ctx()
         .options_mut(|options| options.reduce_texture_memory = true);
@@ -436,11 +433,8 @@ pub fn render(
         selected_game_version_for_runtime.as_str(),
         config,
         external_install_active,
-        active_username,
-        active_launch_auth,
-        active_account_owns_minecraft,
+        auth,
         streamer_mode,
-        account_avatars_by_key,
     );
     render_install_feedback(
         ui,

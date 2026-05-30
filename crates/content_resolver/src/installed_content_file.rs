@@ -11,4 +11,7 @@ pub struct InstalledContentFile {
     pub fallback_lookup_query: Option<String>,
     pub fallback_lookup_key: Option<String>,
     pub managed_identity: Option<InstalledContentIdentity>,
+    /// True when the file has been renamed with a `.DISABLED` suffix by the launcher.
+    /// Modloaders ignore files they don't recognise, so renaming prevents loading without deletion.
+    pub disabled: bool,
 }

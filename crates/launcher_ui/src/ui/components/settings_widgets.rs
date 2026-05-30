@@ -12,7 +12,13 @@ use textui_egui::{
 
 use crate::{
     assets,
-    ui::{components::icon_button, style, text_input_theme},
+    ui::{
+        color::lerp_color32_oklab,
+        components::icon_button,
+        style,
+        text_input_theme,
+        toggle_anim::ToggleAnimState,
+    },
 };
 use settings_widgets_search::{
     SearchableDropdownState, searchable_dropdown_matches, set_owner_focus_pending,
@@ -1288,33 +1294,55 @@ fn switch(ui: &mut Ui, value: &mut bool, metrics: ControlMetrics, id: egui::Id) 
     });
 
     if ui.is_rect_visible(rect) {
-        let how_on = ui.ctx().animate_bool_responsive(response.id, *value);
-        let off_bg = ui.visuals().widgets.inactive.bg_fill;
-        let on_bg = ui.visuals().selection.bg_fill;
-        let bg_fill: egui::Color32 =
-            egui::lerp(egui::Rgba::from(off_bg)..=egui::Rgba::from(on_bg), how_on).into();
-        let bg_stroke = if response.has_focus() {
-            ui.visuals().selection.stroke
-        } else {
-            ui.visuals().widgets.inactive.bg_stroke
-        };
-        let corner_radius = rect.height() / 2.0;
-        ui.painter().rect(
-            rect,
-            corner_radius,
-            bg_fill,
-            bg_stroke,
-            egui::StrokeKind::Inside,
-        );
+        // Animate the knob with cubic ease-out + OKLab colour interpolation,
+        // matching the style of the mod-enable toggle in the instance menu.
+        let anim_id = egui::Id::new(("settings_switch_anim", id));
+        let target = if *value { 1.0f32 } else { 0.0f32 };
+        let dt = ui.ctx().input(|i| i.stable_dt).min(0.1);
 
+        let mut anim: ToggleAnimState = ui
+            .ctx()
+            .data_mut(|d| d.get_temp::<ToggleAnimState>(anim_id))
+            .unwrap_or_else(|| ToggleAnimState::settled(target));
+
+        anim.redirect(target);
+        anim.advance(dt);
+        let pos = anim.visual_pos();
+
+        if !anim.is_done() {
+            ui.ctx().request_repaint();
+        }
+        ui.ctx().data_mut(|d| d.insert_temp(anim_id, anim));
+
+        // Track
+        let visuals = ui.visuals();
+        let off_fill = visuals.widgets.inactive.bg_fill;
+        let on_fill = visuals.selection.bg_fill;
+        let fill = lerp_color32_oklab(off_fill, on_fill, pos);
+
+        let bg_stroke = if response.has_focus() {
+            visuals.selection.stroke
+        } else {
+            let off_color = visuals.widgets.inactive.bg_stroke.color;
+            let on_color = visuals.selection.stroke.color;
+            let stroke_color = lerp_color32_oklab(off_color, on_color, pos);
+            let stroke_w = visuals.widgets.inactive.bg_stroke.width
+                + (visuals.selection.stroke.width - visuals.widgets.inactive.bg_stroke.width) * pos;
+            egui::Stroke::new(stroke_w, stroke_color)
+        };
+
+        let corner_radius = rect.height() / 2.0;
+        ui.painter().rect(rect, corner_radius, fill, bg_stroke, egui::StrokeKind::Inside);
+
+        // Knob — same proportions as before, position driven by eased pos.
         let knob_margin = (metrics.control_height * 0.10).clamp(2.0, 4.0);
         let knob_radius = (rect.height() - (knob_margin * 2.0)) / 2.0;
-        let knob_x = egui::lerp(
-            (rect.left() + knob_margin + knob_radius)..=(rect.right() - knob_margin - knob_radius),
-            how_on,
-        );
+        let knob_x = rect.left() + knob_margin + knob_radius
+            + (rect.width() - (knob_margin + knob_radius) * 2.0) * pos;
         let knob_center = egui::pos2(knob_x, rect.center().y);
-        let knob_fill = ui.visuals().widgets.noninteractive.fg_stroke.color;
+        let knob_off = visuals.widgets.noninteractive.fg_stroke.color;
+        let knob_on = visuals.widgets.active.fg_stroke.color;
+        let knob_fill = lerp_color32_oklab(knob_off, knob_on, pos);
         ui.painter().circle(
             knob_center,
             knob_radius,
