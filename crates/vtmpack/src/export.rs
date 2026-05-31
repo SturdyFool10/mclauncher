@@ -17,8 +17,9 @@ use crate::{
     VtmpackExportStats, VtmpackInstanceMetadata, VtmpackManifest, VtmpackProviderMode,
 };
 
-const XZ_LEVEL_BEST: u32 = 9;
-const ZPAQ_ULTRA_METHOD: &str = "5";
+const XZ_PRESET_STANDARD: u32 = 6;
+const XZ_PRESET_EXTREME_FLAG: u32 = 1 << 31;
+const XZ_PRESET_EXTREME: u32 = 9 | XZ_PRESET_EXTREME_FLAG;
 
 pub fn sanitize_managed_manifest_for_export(
     manifest: &ContentInstallManifest,
@@ -248,76 +249,39 @@ where
     let config_file_count = pack_manifest.configs.len();
     let additional_file_count = pack_manifest.additional_paths.len();
 
-    match options.compression_mode {
-        VtmpackCompressionMode::Standard => {
-            let encoder = xz2::write::XzEncoder::new(output_file, XZ_LEVEL_BEST);
-            let mut archive = tar::Builder::new(encoder);
-            write_tar_payload(
-                &mut archive,
-                &pack_manifest,
-                &sanitized_managed_manifest,
-                bundled_mod_files,
-                mods_dir.as_path(),
-                config_files,
-                configs_dir.as_path(),
-                additional_files,
-                instance_root,
-                total_steps,
-                &mut completed_steps,
-                &mut progress,
-            )?;
-            progress(progress_update(
-                "Finalizing archive...",
-                completed_steps,
-                total_steps,
-            ));
-            archive
-                .finish()
-                .map_err(|err| format!("failed to finalize archive: {err}"))?;
-            let encoder = archive
-                .into_inner()
-                .map_err(|err| format!("failed to flush archive stream: {err}"))?;
-            encoder
-                .finish()
-                .map_err(|err| format!("failed to finalize xz stream: {err}"))?;
-        }
-        VtmpackCompressionMode::Extreme => {
-            let mut tar_bytes = Vec::new();
-            {
-                let mut archive = tar::Builder::new(&mut tar_bytes);
-                write_tar_payload(
-                    &mut archive,
-                    &pack_manifest,
-                    &sanitized_managed_manifest,
-                    bundled_mod_files,
-                    mods_dir.as_path(),
-                    config_files,
-                    configs_dir.as_path(),
-                    additional_files,
-                    instance_root,
-                    total_steps,
-                    &mut completed_steps,
-                    &mut progress,
-                )?;
-                progress(progress_update(
-                    "Compressing archive with ZPAQ...",
-                    completed_steps,
-                    total_steps,
-                ));
-                archive
-                    .finish()
-                    .map_err(|err| format!("failed to finalize uncompressed archive: {err}"))?;
-            }
-            zpaq_rs::compress_stream(
-                Cursor::new(tar_bytes),
-                output_file,
-                ZPAQ_ULTRA_METHOD,
-                Some("vtmpack.tar"),
-                None,
-            )
-            .map_err(|err| format!("failed to finalize zpaq stream: {err}"))?;
-        }
-    }
+    let encoder = xz2::write::XzEncoder::new(
+        output_file,
+        xz_preset_for_compression_mode(options.compression_mode),
+    );
+    let mut archive = tar::Builder::new(encoder);
+    write_tar_payload(
+        &mut archive,
+        &pack_manifest,
+        &sanitized_managed_manifest,
+        bundled_mod_files,
+        mods_dir.as_path(),
+        config_files,
+        configs_dir.as_path(),
+        additional_files,
+        instance_root,
+        total_steps,
+        &mut completed_steps,
+        &mut progress,
+    )?;
+    progress(progress_update(
+        "Finalizing XZ archive...",
+        completed_steps,
+        total_steps,
+    ));
+    archive
+        .finish()
+        .map_err(|err| format!("failed to finalize archive: {err}"))?;
+    let encoder = archive
+        .into_inner()
+        .map_err(|err| format!("failed to flush archive stream: {err}"))?;
+    encoder
+        .finish()
+        .map_err(|err| format!("failed to finalize xz stream: {err}"))?;
     completed_steps += 1;
     progress(progress_update(
         "Export complete.",
@@ -330,6 +294,13 @@ where
         config_files: config_file_count,
         additional_files: additional_file_count,
     })
+}
+
+fn xz_preset_for_compression_mode(mode: VtmpackCompressionMode) -> u32 {
+    match mode {
+        VtmpackCompressionMode::Standard => XZ_PRESET_STANDARD,
+        VtmpackCompressionMode::Extreme => XZ_PRESET_EXTREME,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -456,6 +427,19 @@ fn rediscover_modrinth_mods(
         }
     };
 
+    let known_modrinth_paths = manifest
+        .projects
+        .values()
+        .filter(|project| project.selected_source == Some(ManagedContentSource::Modrinth))
+        .filter(|project| {
+            project
+                .selected_version_id
+                .as_deref()
+                .is_some_and(|version| !version.trim().is_empty())
+        })
+        .map(|project| normalize_pack_path(project.file_path.as_path()))
+        .collect::<HashSet<_>>();
+
     let mut mod_files = Vec::<DiscoveredModFile>::new();
     for entry in entries.flatten() {
         let absolute_path = entry.path();
@@ -466,7 +450,7 @@ fn rediscover_modrinth_mods(
             .strip_prefix(instance_root)
             .unwrap_or(absolute_path.as_path());
         let file_path = normalize_pack_path(relative_path);
-        if file_path.as_os_str().is_empty() {
+        if file_path.as_os_str().is_empty() || known_modrinth_paths.contains(&file_path) {
             continue;
         }
         match modrinth::hash_file_sha1_and_sha512_hex(absolute_path.as_path()) {
@@ -681,7 +665,10 @@ pub fn list_exportable_root_entries(instance_root: &Path) -> Vec<String> {
 }
 
 pub fn default_vtmpack_root_entry_selected(entry: &str) -> bool {
-    matches!(entry, "mods" | "resourcepacks" | "shaderpacks" | "config")
+    matches!(
+        entry,
+        "mods" | "resourcepacks" | "shaderpacks" | "config" | "kubejs" | "tacz"
+    )
 }
 
 fn collect_regular_files_recursive(root: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
